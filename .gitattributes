@@ -1,0 +1,6 @@
+# These scripts run inside a Linux Docker container — they MUST keep LF endings,
+# even when cloned on Windows (otherwise bash fails with "bad interpreter").
+* text=auto eol=lf
+*.sh   text eol=lf
+Dockerfile text eol=lf
+*.md   text eol=lf
