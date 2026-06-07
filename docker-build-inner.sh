@@ -28,14 +28,30 @@ set_kcfg() {
 }
 
 # ---- Check Vivado ----
+# v0.39's plutosdr-fw Makefile expects Vivado 2023.2 (VIVADO_VERSION). Mount the
+# host install at /opt/Xilinx via:  docker-run.sh --vivado /opt/Xilinx
+# With Vivado present, the HDL is built from source -> system_top.bit -> boot.frm.
 HAVE_VIVADO=0
-if [ -f /opt/Xilinx/Vivado/2019.1/settings64.sh ]; then
-    source /opt/Xilinx/Vivado/2019.1/settings64.sh &>/dev/null
+VIVADO_VERSION="${VIVADO_VERSION:-2023.2}"
+VIVADO_SETTINGS="/opt/Xilinx/Vivado/${VIVADO_VERSION}/settings64.sh"
+if [ -f "$VIVADO_SETTINGS" ]; then
+    source "$VIVADO_SETTINGS" &>/dev/null
+    export VIVADO_VERSION
     HAVE_VIVADO=1
-    info "Vivado 2019.1 found — full build"
+    info "Vivado $VIVADO_VERSION found — full build (HDL bitstream + boot.frm)"
 else
-    warn "No Vivado at /opt/Xilinx/Vivado/2019.1 — building Linux + u-boot + rootfs only"
-    warn "system_top.xsa will be downloaded from ADI v0.39 release automatically"
+    # Fall back to any installed Vivado (may warn/fail if it isn't 2023.2).
+    ALT=$(ls /opt/Xilinx/Vivado/*/settings64.sh 2>/dev/null | head -1)
+    if [ -n "$ALT" ]; then
+        source "$ALT" &>/dev/null
+        VIVADO_VERSION=$(basename "$(dirname "$ALT")")
+        export VIVADO_VERSION
+        HAVE_VIVADO=1
+        warn "Using Vivado $VIVADO_VERSION (v0.39 expects 2023.2) — HDL may warn/fail if mismatched"
+    else
+        warn "No Vivado under /opt/Xilinx/Vivado — building Linux + u-boot + rootfs only (no boot.frm)"
+        warn "system_top.xsa will be downloaded from the v0.39 release automatically"
+    fi
 fi
 
 # ---- Clone ----
