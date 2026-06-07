@@ -247,6 +247,13 @@ refclock PPS /dev/pps0 refid PPS lock GPS prefer
 makestep 1 3
 rtcsync
 driftfile /var/lib/chrony/drift
+
+# Serve NTP to the local network. This device becomes a stratum-1, GPS-backed
+# NTP server once it holds a PPS lock (it will NOT serve bad time before lock).
+# Adjust/remove these subnets for your network.
+allow 192.168.0.0/16
+allow 10.0.0.0/8
+allow 172.16.0.0/12
 EOF
 info "  rootfs overlay: $GPS_OVL/etc/chrony.conf written"
 

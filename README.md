@@ -28,6 +28,7 @@ It is built **entirely in Docker** on top of [`sardylan/plutoplus`](https://gith
 | GPS serial | **UART1** (MIO12 TX / MIO13 RX) enabled → **`/dev/ttyPS0`** (see note below) |
 | gpsd | auto‑starts on `/dev/ttyPS0`, forced **9600 baud**, `-n -b` (continuous poll, read‑only) |
 | chrony | auto‑starts with PPS **refclock compiled in** (via `pps-tools`/`timepps.h`) + `/etc/chrony.conf` |
+| NTP server | serves **stratum‑1 GPS time to your LAN** (chrony `allow`, RFC1918 by default; only serves once PPS‑locked) |
 | Tools | `ppstest`, `gpsmon`, `cgps`, `gpspipe` for diagnostics |
 | Console freed | login getty removed from `ttyPS0` so it doesn't fight gpsd |
 | Boot‑safe | `bootdelay=-2` auto‑set so the GPS NMEA stream can't abort U‑Boot autoboot |
