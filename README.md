@@ -14,6 +14,8 @@ It is built **entirely in Docker** on top of [`sardylan/plutoplus`](https://gith
 > `chronyc tracking` reports `Leap status: Normal`, reference ID `PPS`, with system time within a
 > few hundred nanoseconds of GPS once the receiver holds a fix.
 
+**Docs:** [Wiring](docs/WIRING.md) · [Recovery / un-brick](RECOVERY.md) · [TDOA tooling](tdoa/README.md) · [Changelog](CHANGELOG.md)
+
 > ⚠️ **Read [`RECOVERY.md`](RECOVERY.md) before you flash.** The Pluto+ QSPI flash is *unprotected*
 > and is easily corrupted by an interrupted write. Recovery is straightforward via SD‑card boot, but
 > you want to know the procedure *before* you need it.
