@@ -254,6 +254,9 @@ driftfile /var/lib/chrony/drift
 allow 192.168.0.0/16
 allow 10.0.0.0/8
 allow 172.16.0.0/12
+# IPv6 link-local — clients reaching the Pluto over its eth0/usb0 fe80:: address
+# (without this, NTP queries that resolve to the IPv6 address are silently dropped).
+allow fe80::/10
 EOF
 info "  rootfs overlay: $GPS_OVL/etc/chrony.conf written"
 

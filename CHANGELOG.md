@@ -2,6 +2,11 @@
 
 All notable changes to this project. Versions are git tags.
 
+## v1.2
+- **NTP/IPv6 fix:** also allow **IPv6 link-local** clients (`allow fe80::/10`). The v1.1 allow list
+  was IPv4-only, so NTP queries that resolved to the Pluto's `fe80::` address (the common case over
+  `eth0`/`pluto.local`) were silently dropped. Verified serving to a Windows host over `pluto.local`.
+
 ## v1.1
 - **NTP server:** chrony now serves time to the LAN (`allow` for RFC1918 ranges); the device is a
   **stratum-1, GPS-backed NTP server** once it holds a PPS lock (it won't serve bad time before lock).
