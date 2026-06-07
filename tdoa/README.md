@@ -50,3 +50,21 @@ iq = raw[0::2] + 1j * raw[1::2]
   sample index, compare its computed time to the GPS whole‑second. Error = timestamp accuracy.
 - **T3 — two‑node coherence:** feed both Plutos the same signal; cross‑correlate → measured TDOA
   should be ~0 and *stable* (drifts without the GPSDO lock, holds with it).
+
+## GPSDO / frequency-reference hardware (Phase 1 — future testing)
+
+For frequency lock, feed a GPS-disciplined reference into the **Pluto+ external clock input**. A
+**GPSDO** gives you a disciplined frequency **and** a 1 PPS in one unit. Candidates to evaluate:
+
+| Option | Provides | Notes |
+|---|---|---|
+| **Leo Bodnar Mini Precision GPS Reference** | programmable freq (set to the Pluto+ ext-ref, e.g. 40 MHz) + 1 PPS | popular for SDR; ~$150; programmable output is the key advantage |
+| **u-blox LEA-M8F** | GNSS + frequency-disciplined oscillator + timepulse/PPS + NMEA | true all-in-one GPSDO+receiver on one module |
+| **u-blox NEO/LEA-M8T** | top-tier PPS + survey-in / single-sat timing + NMEA | timing receiver (great PPS/time); not a 10 MHz GPSDO by itself |
+| **OCXO GPSDO modules** ("10 MHz + 1 PPS", u-blox + OCXO) | 10 MHz disciplined + 1 PPS | cheap (AliExpress); verify Pluto+ accepts 10 MHz, or use a programmable unit for 40 MHz |
+| **Trimble Thunderbolt / Jackson Labs** | lab-grade 10 MHz + 1 PPS | used market; gold-standard stability |
+
+> ⚠️ Confirm your **Pluto+ external clock input's expected frequency** (commonly **40 MHz**). A
+> programmable GPSDO (e.g. Leo Bodnar) lets you output that exact frequency; fixed 10 MHz units need
+> the board/clocking to accept 10 MHz. The same unit's **1 PPS** feeds the time anchor (pps-gpio on
+> MIO9, or injected into RX for the T2 validator).
