@@ -10,6 +10,10 @@ Custom firmware for the **Pluto+ (ADALM-Pluto+ / "Pluto SDR+" clone, Zynq‑7010
 It is built **entirely in Docker** on top of [`sardylan/plutoplus`](https://github.com/sardylan/plutoplus)
 **`fw-0.39`** — no local Xilinx/Vivado install is required to produce a flashable firmware image.
 
+> ✅ **Status: verified working.** Achieves a **stratum-1, PPS-disciplined** system clock —
+> `chronyc tracking` reports `Leap status: Normal`, reference ID `PPS`, with system time within a
+> few hundred nanoseconds of GPS once the receiver holds a fix.
+
 > ⚠️ **Read [`RECOVERY.md`](RECOVERY.md) before you flash.** The Pluto+ QSPI flash is *unprotected*
 > and is easily corrupted by an interrupted write. Recovery is straightforward via SD‑card boot, but
 > you want to know the procedure *before* you need it.
