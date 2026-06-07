@@ -20,3 +20,10 @@ tools/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Secrets — never commit (PATs, keys, env)
+token
+*.pat
+*.key
+.env
+.netrc
