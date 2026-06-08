@@ -418,6 +418,40 @@ else:
     print(f"  Makefile patched ({n} git describe call(s) → v0.39 fallback)")
 PYEOF
 
+# ---- Integrate pps_counter into the Pluto block design (needs Vivado) ----
+# RTL is added INSIDE system_bd.tcl (via add_files) BEFORE create_bd_cell
+# references it, because adi_project_create sources system_bd.tcl before the
+# top-level adi_project_files step runs. Idempotent; forces an XSA re-synth only
+# when the integration actually changes.
+if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_counter/pps_counter.v ]; then
+    info "Integrating pps_counter into the Pluto block design..."
+    HDL_CHANGED=0
+    if ! cmp -s /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v 2>/dev/null; then
+        cp /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v
+        HDL_CHANGED=1
+        info "  pps_counter.v -> hdl/projects/pluto/"
+    fi
+    if ! grep -q 'pps_counter_0' hdl/projects/pluto/system_bd.tcl; then
+        cat >> hdl/projects/pluto/system_bd.tcl << 'TCLEOF'
+
+# ---- GPS timing counter (added by docker-build-inner.sh) ----
+add_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v
+update_compile_order -fileset sources_1
+create_bd_cell -type module -reference pps_counter pps_counter_0
+ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk
+ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn
+ad_connect GND              pps_counter_0/pps_in
+ad_cpu_interconnect 0x7C460000 pps_counter_0
+TCLEOF
+        HDL_CHANGED=1
+        info "  system_bd.tcl: pps_counter_0 @ 0x7C460000 (cnt_clk=l_clk, pps=GND)"
+    fi
+    if (( HDL_CHANGED )); then
+        rm -f build/system_top.xsa
+        info "  removed cached XSA -> bitstream will re-synth with the counter"
+    fi
+fi
+
 # ---- Build (Option B: pluto.frm only; skip the Vitis/xsct FSBL + boot.frm) ----
 # The FSBL/boot.frm path needs Vitis xsct + a headless Eclipse/Xvfb stack that is
 # brittle in a container. A PL-only design loads its bitstream from pluto.frm's

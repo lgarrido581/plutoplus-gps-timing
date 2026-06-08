@@ -19,44 +19,37 @@ needs no extra FPGA pin** and is the recommended starting point.
 
 ## Integration into the Pluto HDL (ADI block design)
 
-This is the part that takes build iterations. Outline:
+**Automated** by `docker-build-inner.sh` (the `--vivado` build): it copies this
+RTL into `hdl/projects/pluto/`, appends the wiring to `system_bd.tcl`, and forces
+an XSA re-synth when the integration changes. The appended TCL:
 
-1. **Add the RTL to the project** — in `hdl/projects/pluto/system_project.tcl`
-   add the source:
-   ```tcl
-   add_files -norecurse $ad_hdl_dir/../pps_counter/pps_counter.v
-   ```
-2. **Instantiate + wire it in the block design** — in
-   `hdl/projects/pluto/system_bd.tcl`:
-   ```tcl
-   create_bd_cell -type module -reference pps_counter pps_counter_0
-   # counter clock = AD936x sample clock; reset from the system reset
-   ad_connect  $sys_cpu_clk      pps_counter_0/s_axi_aclk
-   ad_connect  sys_cpu_resetn    pps_counter_0/s_axi_aresetn
-   ad_connect  axi_ad9361/l_clk  pps_counter_0/cnt_clk        ;# sample clock
-   ad_connect  sys_cpu_resetn    pps_counter_0/cnt_resetn
-   ad_connect  GND               pps_counter_0/pps_in         ;# SW-latch (no pin yet)
-   # hook the AXI-Lite slave onto the PS interconnect at a free address
-   ad_cpu_interconnect 0x43C00000 pps_counter_0
-   ```
-   (Exact net names — `sys_cpu_clk`, `axi_ad9361/l_clk` — may differ; the first
-   build will tell us. For HW-latch later, replace the `GND` connect with the PPS
-   PL pin and add an XDC line.)
-3. **Force the HDL to rebuild** (the XSA target has no real prereqs):
-   ```sh
-   rm build/system_top.xsa
-   ```
-   then the normal `./docker-run.sh --vivado …` rebuilds the bitstream with the
-   counter and repackages `pluto.frm`.
+```tcl
+add_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v
+update_compile_order -fileset sources_1
+create_bd_cell -type module -reference pps_counter pps_counter_0
+ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk   ;# AD936x sample clock
+ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn
+ad_connect GND              pps_counter_0/pps_in     ;# SW-latch (no PL pin yet)
+ad_cpu_interconnect 0x7C460000 pps_counter_0         ;# AXI4-Lite base address
+```
+
+Real net names confirmed from the Pluto BD: AXI clock `sys_cpu_clk`
+(`FCLK_CLK0`, 100 MHz), reset `sys_cpu_resetn`, sample clock `axi_ad9361/l_clk`.
+`ad_cpu_interconnect` auto-wires `s_axi` + its clock/reset. The RTL is added
+*inside* `system_bd.tcl` (not `system_project.tcl`) because the BD is built
+during `adi_project_create`, before the top-level file list is added.
+
+For the HW-latch upgrade later: replace the `GND` connect with the PPS PL pin
+(a `create_bd_port` + `ad_connect` + an XDC `set_property PACKAGE_PIN` line).
 
 ## Device tree / software access
 
 Simplest: read the registers from userspace by `mmap`-ing `/dev/mem` at the
-assigned base (`0x43C00000` above) — no driver needed:
+assigned base (`0x7C460000`) — no driver needed:
 
 ```python
 import mmap, os, struct, time
-BASE = 0x43C00000
+BASE = 0x7C460000
 fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
 m  = mmap.mmap(fd, 0x1000, offset=BASE)
 def rd(off): return struct.unpack("<I", m[off:off+4])[0]

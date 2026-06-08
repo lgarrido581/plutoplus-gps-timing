@@ -51,6 +51,7 @@ docker run --rm \
     -v "$(pwd)/docker-build-inner.sh:/build/scripts/docker-build-inner.sh:ro" \
     -v "$(pwd)/output:/build/output" \
     -v "plutoplus-src-cache:/build/src" \
+    -v "$(pwd)/hdl:/build/hdl-src:ro" \
     $VIVADO_MOUNT \
     --name plutoplus-gps-build \
     "$IMAGE" 2>&1 | tee build.log
