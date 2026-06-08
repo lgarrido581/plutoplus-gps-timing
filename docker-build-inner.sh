@@ -485,11 +485,6 @@ set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta
 set_property PACKAGE_PIN F20 [get_ports pps_ext]
 set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]
 set_property PULLDOWN TRUE [get_ports pps_ext]
-# pblock: confine the counter to one clock region to relieve congestion near
-# axi_ad9361 (timing closure). Tune the region if WNS does not improve.
-create_pblock pblock_pps
-add_cells_to_pblock [get_pblocks pblock_pps] [get_cells -quiet -hierarchical -filter {NAME =~ *pps_counter_0*}]
-resize_pblock [get_pblocks pblock_pps] -add {CLOCKREGION_X0Y0}
 """)
 
 if changed:
@@ -516,6 +511,26 @@ if old in s:
     print("  adi_project_xilinx.tcl: timing gate downgraded to warning")
 else:
     print("  WARNING: timing-gate text not found; gate NOT patched", file=sys.stderr)
+PYEOF
+        HDL_CHANGED=1
+    fi
+    # Timing closure: use a Performance impl strategy (explore placement +
+    # post-route phys_opt) instead of the default. Injected right before the ADI
+    # flow's `launch_runs impl_1`. Longer build, but the real lever for recovering
+    # negative slack on this congested device.
+    if [ -f "$GATE" ] && ! grep -q 'PPS_STRATEGY override' "$GATE"; then
+        python3 - "$GATE" << 'PYEOF'
+import sys
+f = sys.argv[1]
+s = open(f).read()
+old = '  launch_runs impl_1 -to_step write_bitstream'
+new = ('  set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1] ;# PPS_STRATEGY override\n'
+       '  launch_runs impl_1 -to_step write_bitstream')
+if old in s and 'PPS_STRATEGY override' not in s:
+    open(f,'w').write(s.replace(old, new, 1))
+    print("  adi_project_xilinx.tcl: impl strategy -> Performance_ExplorePostRoutePhysOpt")
+else:
+    print("  WARNING: impl launch line not found; strategy NOT set", file=sys.stderr)
 PYEOF
         HDL_CHANGED=1
     fi
