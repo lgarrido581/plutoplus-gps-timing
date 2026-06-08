@@ -59,6 +59,19 @@ else
     fi
 fi
 
+# Vivado WebTalk fingerprints the host via libudev (udev_enumerate_scan_devices),
+# which heap-corrupts and aborts inside a container. Disable WebTalk so the HDL
+# build (write_bitstream) doesn't crash. Vivado reads ~/.Xilinx/Vivado/Vivado_init.tcl
+# on every launch.
+if (( HAVE_VIVADO )); then
+    mkdir -p "$HOME/.Xilinx/Vivado"
+    cat > "$HOME/.Xilinx/Vivado/Vivado_init.tcl" << 'TCLEOF'
+catch { config_webtalk -install off }
+catch { config_webtalk -user off }
+TCLEOF
+    info "  Vivado WebTalk disabled (avoids libudev crash in container)"
+fi
+
 # ---- Clone ----
 # Check if an existing clone is actually the right repo; wipe and re-clone if not.
 if [ -d "$SRC/.git" ]; then
