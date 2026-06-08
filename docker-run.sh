@@ -5,7 +5,8 @@
 #
 # Usage:
 #   ./docker-run.sh                        # build without Vivado (Linux/rootfs only)
-#   ./docker-run.sh --vivado /opt/Xilinx   # mount your Vivado install for full build
+#   ./docker-run.sh --vivado /home/you/Xilinx   # mount your Vivado install (full build w/ boot.frm)
+#       pass the path you installed Vivado to; it is mounted at the SAME path inside the container.
 #
 # Output firmware lands in ./output/
 # =============================================================================
@@ -31,11 +32,14 @@ mkdir -p output
 echo "[*] Building Docker image..."
 docker build -t "$IMAGE" .
 
-# Construct Vivado mount if provided
+# Construct Vivado mount if provided.
+# IMPORTANT: mount at the SAME absolute path inside the container. Vivado's
+# settings64.sh hardcodes its install path, so mounting it elsewhere (e.g.
+# /opt/Xilinx) breaks it -> vivado fails -> the build silently downloads the XSA.
 VIVADO_MOUNT=""
 if [ -n "$VIVADO_HOST" ]; then
-    echo "[*] Mounting Vivado from: $VIVADO_HOST"
-    VIVADO_MOUNT="-v ${VIVADO_HOST}:/opt/Xilinx:ro"
+    echo "[*] Mounting Vivado from: $VIVADO_HOST (same path in container)"
+    VIVADO_MOUNT="-v ${VIVADO_HOST}:${VIVADO_HOST}:ro -e VIVADO_PATH=${VIVADO_HOST}"
 fi
 
 echo "[*] Starting build container (logging to build.log)..."

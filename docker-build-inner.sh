@@ -32,24 +32,29 @@ set_kcfg() {
 # host install at /opt/Xilinx via:  docker-run.sh --vivado /opt/Xilinx
 # With Vivado present, the HDL is built from source -> system_top.bit -> boot.frm.
 HAVE_VIVADO=0
+# VIVADO_PATH is set by docker-run.sh (--vivado) and equals the host install path,
+# mounted at the SAME path here so Vivado's settings64.sh (which hardcodes its
+# absolute path) resolves its helper scripts. Default /opt/Xilinx for legacy use.
+VIVADO_PATH="${VIVADO_PATH:-/opt/Xilinx}"
 VIVADO_VERSION="${VIVADO_VERSION:-2023.2}"
-VIVADO_SETTINGS="/opt/Xilinx/Vivado/${VIVADO_VERSION}/settings64.sh"
+VIVADO_SETTINGS="$VIVADO_PATH/Vivado/${VIVADO_VERSION}/settings64.sh"
 if [ -f "$VIVADO_SETTINGS" ]; then
     source "$VIVADO_SETTINGS" &>/dev/null
-    export VIVADO_VERSION
+    export VIVADO_VERSION VIVADO_SETTINGS          # Makefile honors these (?=)
     HAVE_VIVADO=1
-    info "Vivado $VIVADO_VERSION found — full build (HDL bitstream + boot.frm)"
+    info "Vivado $VIVADO_VERSION found at $VIVADO_PATH — full build (HDL bitstream + boot.frm)"
 else
-    # Fall back to any installed Vivado (may warn/fail if it isn't 2023.2).
-    ALT=$(ls /opt/Xilinx/Vivado/*/settings64.sh 2>/dev/null | head -1)
+    # Fall back to any installed Vivado under VIVADO_PATH.
+    ALT=$(ls "$VIVADO_PATH"/Vivado/*/settings64.sh 2>/dev/null | head -1)
     if [ -n "$ALT" ]; then
         source "$ALT" &>/dev/null
         VIVADO_VERSION=$(basename "$(dirname "$ALT")")
-        export VIVADO_VERSION
+        VIVADO_SETTINGS="$ALT"
+        export VIVADO_VERSION VIVADO_SETTINGS
         HAVE_VIVADO=1
-        warn "Using Vivado $VIVADO_VERSION (v0.39 expects 2023.2) — HDL may warn/fail if mismatched"
+        warn "Using Vivado $VIVADO_VERSION at $VIVADO_PATH (v0.39 expects 2023.2) — may warn/fail if mismatched"
     else
-        warn "No Vivado under /opt/Xilinx/Vivado — building Linux + u-boot + rootfs only (no boot.frm)"
+        warn "No Vivado under $VIVADO_PATH/Vivado — building Linux + u-boot + rootfs only (no boot.frm)"
         warn "system_top.xsa will be downloaded from the v0.39 release automatically"
     fi
 fi
