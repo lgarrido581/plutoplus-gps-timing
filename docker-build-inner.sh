@@ -59,25 +59,21 @@ else
     fi
 fi
 
-# Vivado WebTalk fingerprints the host via libudev (udev_enumerate_scan_devices),
-# which heap-corrupts and aborts (SIGABRT/Error 134) inside a container. It can't
-# be disabled via config_webtalk on a read-only Vivado mount, and the host-scan
-# runs anyway. Robust fix: LD_PRELOAD a stub that makes that one libudev call a
-# no-op. Nothing else in the build calls it, so preloading globally is safe.
+# On Ubuntu 22.04 the libudev host-scan that crashed Vivado WebTalk on 20.04 no
+# longer aborts, so no LD_PRELOAD workaround is needed (a global LD_PRELOAD also
+# interferes with buildroot's fakeroot). Just best-effort disable user WebTalk.
 if (( HAVE_VIVADO )); then
-    cat > /tmp/udev_stub.c << 'CEOF'
-/* no-op replacement for libudev device scan (Vivado WebTalk crashes on it here) */
-int udev_enumerate_scan_devices(void *e) { (void)e; return 0; }
-CEOF
-    if gcc -shared -fPIC -o /tmp/libudevstub.so /tmp/udev_stub.c; then
-        export LD_PRELOAD="/tmp/libudevstub.so${LD_PRELOAD:+:$LD_PRELOAD}"
-        info "  Vivado: LD_PRELOAD udev stub installed (prevents WebTalk/libudev SIGABRT)"
-    else
-        warn "  Could not build udev stub — Vivado may crash on WebTalk host scan"
-    fi
-    # best-effort user-pref webtalk off (writable area)
     mkdir -p "$HOME/.Xilinx/Vivado"
     printf 'catch { config_webtalk -user off }\n' > "$HOME/.Xilinx/Vivado/Vivado_init.tcl"
+
+    # The cached buildroot host-fakeroot was built on 20.04 glibc; fakeroot hooks
+    # versioned glibc symbols, so it mis-fakes mknod on 22.04 ("Operation not
+    # permitted" building rootfs.cpio). Force a one-time rebuild so it's native.
+    if [ -d buildroot/output/build ]; then
+        rm -rf buildroot/output/build/host-fakeroot-* \
+               buildroot/output/host/bin/fakeroot \
+               buildroot/output/host/bin/faked 2>/dev/null || true
+    fi
 fi
 
 # ---- Clone ----
