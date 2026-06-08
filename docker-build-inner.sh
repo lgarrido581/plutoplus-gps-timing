@@ -419,51 +419,83 @@ else:
 PYEOF
 
 # ---- Integrate pps_counter into the Pluto block design (needs Vivado) ----
-# RTL is added INSIDE system_bd.tcl (via add_files) BEFORE create_bd_cell
-# references it, because adi_project_create sources system_bd.tcl before the
-# top-level adi_project_files step runs. Idempotent; forces an XSA re-synth only
-# when the integration actually changes.
+# Plumbs an external PPS pin (F20) through system_top.v -> BD -> pps_counter, adds
+# the CDC false_paths + the F20 pin constraint (1.8V, PULLDOWN) + a pblock for
+# timing closure. The BD/XDC blocks are REGENERATED each run (strip-to-marker then
+# re-append) so config changes actually take effect. RTL is added INSIDE
+# system_bd.tcl (add_files) before create_bd_cell references it.
 if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_counter/pps_counter.v ]; then
-    info "Integrating pps_counter into the Pluto block design..."
+    info "Integrating pps_counter into the Pluto block design (HW-latch: pps_ext=F20)..."
+    rm -f /tmp/pps_changed
     HDL_CHANGED=0
     if ! cmp -s /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v 2>/dev/null; then
         cp /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v
         HDL_CHANGED=1
         info "  pps_counter.v -> hdl/projects/pluto/"
     fi
-    if ! grep -q 'pps_counter_0' hdl/projects/pluto/system_bd.tcl; then
-        cat >> hdl/projects/pluto/system_bd.tcl << 'TCLEOF'
+    python3 - << 'PYEOF'
+pdir = "hdl/projects/pluto"
+changed = False
 
-# ---- GPS timing counter (added by docker-build-inner.sh) ----
+# system_top.v: add the pps_ext top-level port + wrapper connection (once)
+stv = pdir + "/system_top.v"
+s = open(stv).read()
+if "pps_ext" not in s:
+    s = s.replace("  inout           pl_gpio4\n);",
+                  "  inout           pl_gpio4,\n  input           pps_ext\n);", 1)
+    s = s.replace("    .gpio_i (gpio_i),\n",
+                  "    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n", 1)
+    open(stv, "w").write(s); changed = True
+    print("  system_top.v: pps_ext port + wrapper connection added")
+
+def regen(path, marker, block):
+    global changed
+    s = open(path).read()
+    i = s.find(marker)
+    base = (s[:i] if i >= 0 else s).rstrip("\n")
+    new = base + "\n\n" + marker + block
+    if new != s:
+        open(path, "w").write(new); changed = True
+        print("  %s: (re)generated pps_counter block" % path)
+
+regen(pdir + "/system_bd.tcl",
+      "# ---- GPS timing counter (added by docker-build-inner.sh) ----", """
 add_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v
 update_compile_order -fileset sources_1
 create_bd_cell -type module -reference pps_counter pps_counter_0
 ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk
 ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn
-ad_connect GND              pps_counter_0/pps_in
+create_bd_port -dir I pps_ext
+ad_connect pps_ext pps_counter_0/pps_in
 ad_cpu_interconnect 0x7C460000 pps_counter_0
-TCLEOF
-        HDL_CHANGED=1
-        info "  system_bd.tcl: pps_counter_0 @ 0x7C460000 (cnt_clk=l_clk, pps=GND)"
-    fi
-    # CDC constraints: the l_clk <-> clk_fpga_0 crossings are handled in RTL by
-    # 2-FF synchronizers (gray code for the live counter), so tell STA not to time
-    # them. false_path -to the first capture stage is the standard CDC constraint.
-    XDC=hdl/projects/pluto/system_constr.xdc
-    if [ -f "$XDC" ] && ! grep -q 'pps_counter CDC' "$XDC"; then
-        cat >> "$XDC" << 'XDCEOF'
+""")
 
-# ---- pps_counter CDC (added by docker-build-inner.sh) ----
+regen(pdir + "/system_constr.xdc",
+      "# ---- pps_counter CDC (added by docker-build-inner.sh) ----", """
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg[*]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg[*]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg[*]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg[*]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg[0]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg[0]/D}]
-XDCEOF
-        HDL_CHANGED=1
-        info "  system_constr.xdc: pps_counter CDC false_path added"
-    fi
+set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg[0]/D}]
+# PPS external input: F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V). PULLDOWN so
+# an unconnected pin reads 0 (no phantom PPS). DRIVE WITH <=1.8V (level-shift the
+# 3.3V GPS PPS before this pin AND before MIO9!).
+set_property PACKAGE_PIN F20 [get_ports pps_ext]
+set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]
+set_property PULLDOWN TRUE [get_ports pps_ext]
+# pblock: confine the counter to one clock region to relieve congestion near
+# axi_ad9361 (timing closure). Tune the region if WNS does not improve.
+create_pblock pblock_pps
+add_cells_to_pblock [get_pblocks pblock_pps] [get_cells -quiet -hierarchical -filter {NAME =~ *pps_counter_0*}]
+resize_pblock [get_pblocks pblock_pps] -add {CLOCKREGION_X0Y0}
+""")
+
+if changed:
+    open("/tmp/pps_changed", "w").write("1")
+PYEOF
+    [ -f /tmp/pps_changed ] && HDL_CHANGED=1
     # The xc7z010-1 is nearly full; adding an AXI slave breaks the ADI design's
     # already-tight timing (violations are in axi_ad9361 CONTROL paths, not ours).
     # Downgrade the ADI timing gate from fatal error to warning so we still get a
