@@ -487,10 +487,11 @@ regen(pdir + "/system_bd.tcl",
 # CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
 # NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
 # bus index. set_false_path -to <cell> applies to its data input.
-# NOTE: do NOT false_path the 32-bit gray_s1 bus -- letting STA time it (meets
-# with margin) keeps those FFs packed; false-pathing scatters them and congests
-# axi_ad9361 (measured -1.5ns -> -2.5ns). Gray + 2-FF sync stays correct.
-cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]\n"
+# gray_s1 (32-bit l_clk->clk_fpga_0) MUST be false_pathed: it does not meet timing
+# if STA times it (measured: removing it -> -3.3ns/242 endpoints). The gray code +
+# 2-FF sync remains functionally correct (only 1 bit changes per cnt_clk).
+cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]\n"
