@@ -472,13 +472,16 @@ ad_cpu_interconnect 0x7C460000 pps_counter_0
 
 regen(pdir + "/system_constr.xdc",
       "# ---- pps_counter CDC (added by docker-build-inner.sh) ----", """
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg[*]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg[*]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg[*]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg[*]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg[0]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg[0]/D}]
-set_false_path -to [get_pins -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg[0]/D}]
+# NOTE: target cells (not pins) with bracket-free patterns -- in a TCL -filter
+# NAME=~, "reg[*]" is a character class (matches zero), so the bus index must be
+# covered by a trailing "*". set_false_path -to <cell> applies to its data input.
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]
 # PPS external input: F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V). PULLDOWN so
 # an unconnected pin reads 0 (no phantom PPS). DRIVE WITH <=1.8V (level-shift the
 # 3.3V GPS PPS before this pin AND before MIO9!).
