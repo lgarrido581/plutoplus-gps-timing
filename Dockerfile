@@ -63,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfreetype6 \
     libfontconfig1 \
     x11-utils \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Generate locale (buildroot wants it)
