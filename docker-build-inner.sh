@@ -529,26 +529,24 @@ else:
 PYEOF
         HDL_CHANGED=1
     fi
-    # Timing closure: use a Performance impl strategy (explore placement +
-    # post-route phys_opt) instead of the default. Injected right before the ADI
-    # flow's `launch_runs impl_1`. Longer build, but the real lever for recovering
-    # negative slack on this congested device.
-    if [ -f "$GATE" ] && ! grep -q 'PPS_STRATEGY override' "$GATE"; then
-        python3 - "$GATE" << 'PYEOF'
-import sys
+    # Optional impl strategy override. Default: NONE -- the ADI default beats
+    # Performance_Explore, which backfired here (-2.7ns/129 endpoints vs default
+    # -1.5ns/10). Set PPS_IMPL_STRATEGY=<name> to experiment. Normalized each run.
+    PPS_IMPL_STRATEGY="${PPS_IMPL_STRATEGY:-}" python3 - "$GATE" << 'PYEOF'
+import os, re, sys
 f = sys.argv[1]
+strat = os.environ.get("PPS_IMPL_STRATEGY", "").strip()
 s = open(f).read()
-old = '  launch_runs impl_1 -to_step write_bitstream'
-new = ('  set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1] ;# PPS_STRATEGY override\n'
-       '  launch_runs impl_1 -to_step write_bitstream')
-if old in s and 'PPS_STRATEGY override' not in s:
-    open(f,'w').write(s.replace(old, new, 1))
-    print("  adi_project_xilinx.tcl: impl strategy -> Performance_ExplorePostRoutePhysOpt")
-else:
-    print("  WARNING: impl launch line not found; strategy NOT set", file=sys.stderr)
+base = '  launch_runs impl_1 -to_step write_bitstream'
+s2 = re.sub(r'  set_property strategy [^\n]*PPS_STRATEGY override\n', '', s)
+if strat:
+    s2 = s2.replace(base, '  set_property strategy %s [get_runs impl_1] ;# PPS_STRATEGY override\n%s' % (strat, base), 1)
+if s2 != s:
+    open(f, 'w').write(s2)
+    open("/tmp/pps_changed", "w").write("1")
+    print("  impl strategy: %s" % (strat if strat else "ADI default (override removed)"))
 PYEOF
-        HDL_CHANGED=1
-    fi
+    [ -f /tmp/pps_changed ] && HDL_CHANGED=1
     if (( HDL_CHANGED )); then
         rm -f build/system_top.xsa
         info "  removed cached XSA -> bitstream will re-synth with the counter"
