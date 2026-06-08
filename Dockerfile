@@ -49,6 +49,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     locales \
     zip \
+    # Runtime libs so a host Vivado 2023.2 mounted via --vivado can run in-container
+    libtinfo5 \
+    libncurses5 \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    libxtst6 \
+    libxi6 \
+    libfreetype6 \
+    libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Generate locale (buildroot wants it)
