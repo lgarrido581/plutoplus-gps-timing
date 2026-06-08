@@ -5,7 +5,10 @@
 # Vivado is NOT included — mount it from the host at runtime if needed.
 # All GPS changes (DTS, kernel config, gpsd/chrony) build without Vivado.
 # =============================================================================
-FROM ubuntu:20.04
+# 22.04 (not 20.04): Vivado 2023.2's host-info WebTalk scan crashes in 20.04's
+# libudev inside a container (udev_enumerate_scan_devices SIGABRT). 22.04's
+# libudev is fine and is Vivado 2023.2's supported platform.
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CROSS_COMPILE=arm-linux-gnueabihf-
