@@ -60,16 +60,24 @@ else
 fi
 
 # Vivado WebTalk fingerprints the host via libudev (udev_enumerate_scan_devices),
-# which heap-corrupts and aborts inside a container. Disable WebTalk so the HDL
-# build (write_bitstream) doesn't crash. Vivado reads ~/.Xilinx/Vivado/Vivado_init.tcl
-# on every launch.
+# which heap-corrupts and aborts (SIGABRT/Error 134) inside a container. It can't
+# be disabled via config_webtalk on a read-only Vivado mount, and the host-scan
+# runs anyway. Robust fix: LD_PRELOAD a stub that makes that one libudev call a
+# no-op. Nothing else in the build calls it, so preloading globally is safe.
 if (( HAVE_VIVADO )); then
+    cat > /tmp/udev_stub.c << 'CEOF'
+/* no-op replacement for libudev device scan (Vivado WebTalk crashes on it here) */
+int udev_enumerate_scan_devices(void *e) { (void)e; return 0; }
+CEOF
+    if gcc -shared -fPIC -o /tmp/libudevstub.so /tmp/udev_stub.c; then
+        export LD_PRELOAD="/tmp/libudevstub.so${LD_PRELOAD:+:$LD_PRELOAD}"
+        info "  Vivado: LD_PRELOAD udev stub installed (prevents WebTalk/libudev SIGABRT)"
+    else
+        warn "  Could not build udev stub — Vivado may crash on WebTalk host scan"
+    fi
+    # best-effort user-pref webtalk off (writable area)
     mkdir -p "$HOME/.Xilinx/Vivado"
-    cat > "$HOME/.Xilinx/Vivado/Vivado_init.tcl" << 'TCLEOF'
-catch { config_webtalk -install off }
-catch { config_webtalk -user off }
-TCLEOF
-    info "  Vivado WebTalk disabled (avoids libudev crash in container)"
+    printf 'catch { config_webtalk -user off }\n' > "$HOME/.Xilinx/Vivado/Vivado_init.tcl"
 fi
 
 # ---- Clone ----
