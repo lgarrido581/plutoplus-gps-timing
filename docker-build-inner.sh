@@ -40,6 +40,16 @@ VIVADO_VERSION="${VIVADO_VERSION:-2023.2}"
 VIVADO_SETTINGS="$VIVADO_PATH/Vivado/${VIVADO_VERSION}/settings64.sh"
 if [ -f "$VIVADO_SETTINGS" ]; then
     source "$VIVADO_SETTINGS" &>/dev/null
+    # Also source Vitis if installed — it provides xsct, needed to build the FSBL
+    # for boot.frm. Sourcing prepends Vitis/bin to PATH and it survives the later
+    # `source VIVADO_SETTINGS` in the Makefile recipes (which only prepends).
+    VITIS_SETTINGS="$VIVADO_PATH/Vitis/${VIVADO_VERSION}/settings64.sh"
+    if [ -f "$VITIS_SETTINGS" ]; then
+        source "$VITIS_SETTINGS" &>/dev/null
+        info "  Vitis $VIVADO_VERSION found — xsct available (FSBL/boot.frm)"
+    else
+        warn "  Vitis NOT found — HDL/bitstream OK, but FSBL/boot.frm (xsct) will fail"
+    fi
     export VIVADO_VERSION VIVADO_SETTINGS          # Makefile honors these (?=)
     HAVE_VIVADO=1
     info "Vivado $VIVADO_VERSION found at $VIVADO_PATH — full build (HDL bitstream + boot.frm)"
