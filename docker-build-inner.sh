@@ -425,7 +425,11 @@ PYEOF
 # re-append) so config changes actually take effect. RTL is added INSIDE
 # system_bd.tcl (add_files) before create_bd_cell references it.
 if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_counter/pps_counter.v ]; then
-    info "Integrating pps_counter into the Pluto block design (HW-latch: pps_ext=F20)..."
+    # PPS_HWLATCH=1 -> hardware latch via F20 (un-prunes ~400 FF; breaks timing on
+    # this near-full xc7z010-1). Default 0 -> software latch (LIVE_COUNT only),
+    # prunes that logic for far better timing. Toggle via env in docker-run.sh.
+    PPS_HWLATCH="${PPS_HWLATCH:-0}"
+    info "Integrating pps_counter into the Pluto block design (HW-latch=$PPS_HWLATCH)..."
     rm -f /tmp/pps_changed
     HDL_CHANGED=0
     if ! cmp -s /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v 2>/dev/null; then
@@ -433,20 +437,30 @@ if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_cou
         HDL_CHANGED=1
         info "  pps_counter.v -> hdl/projects/pluto/"
     fi
-    python3 - << 'PYEOF'
+    PPS_HWLATCH="$PPS_HWLATCH" python3 - << 'PYEOF'
+import os
 pdir = "hdl/projects/pluto"
+hwlatch = os.environ.get("PPS_HWLATCH", "0") == "1"
 changed = False
 
-# system_top.v: add the pps_ext top-level port + wrapper connection (once)
+# system_top.v: add/remove the pps_ext top-level port to match the mode
 stv = pdir + "/system_top.v"
 s = open(stv).read()
-if "pps_ext" not in s:
+has = "pps_ext" in s
+if hwlatch and not has:
     s = s.replace("  inout           pl_gpio4\n);",
                   "  inout           pl_gpio4,\n  input           pps_ext\n);", 1)
     s = s.replace("    .gpio_i (gpio_i),\n",
                   "    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n", 1)
     open(stv, "w").write(s); changed = True
-    print("  system_top.v: pps_ext port + wrapper connection added")
+    print("  system_top.v: pps_ext port added (hardware latch)")
+elif not hwlatch and has:
+    s = s.replace("  inout           pl_gpio4,\n  input           pps_ext\n);",
+                  "  inout           pl_gpio4\n);", 1)
+    s = s.replace("    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n",
+                  "    .gpio_i (gpio_i),\n", 1)
+    open(stv, "w").write(s); changed = True
+    print("  system_top.v: pps_ext port removed (software latch)")
 
 def regen(path, marker, block):
     global changed
@@ -458,37 +472,35 @@ def regen(path, marker, block):
         open(path, "w").write(new); changed = True
         print("  %s: (re)generated pps_counter block" % path)
 
+pps_conn = ("create_bd_port -dir I pps_ext\nad_connect pps_ext pps_counter_0/pps_in\n"
+            if hwlatch else "ad_connect GND pps_counter_0/pps_in\n")
 regen(pdir + "/system_bd.tcl",
-      "# ---- GPS timing counter (added by docker-build-inner.sh) ----", """
-add_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v
-update_compile_order -fileset sources_1
-create_bd_cell -type module -reference pps_counter pps_counter_0
-ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk
-ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn
-create_bd_port -dir I pps_ext
-ad_connect pps_ext pps_counter_0/pps_in
-ad_cpu_interconnect 0x7C460000 pps_counter_0
-""")
+      "# ---- GPS timing counter (added by docker-build-inner.sh) ----",
+      "\nadd_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v\n"
+      "update_compile_order -fileset sources_1\n"
+      "create_bd_cell -type module -reference pps_counter pps_counter_0\n"
+      "ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk\n"
+      "ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn\n"
+      + pps_conn +
+      "ad_cpu_interconnect 0x7C460000 pps_counter_0\n")
 
+# CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
+# NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
+# bus index. set_false_path -to <cell> applies to its data input.
+cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]\n")
+pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
+       "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"
+       "set_property PACKAGE_PIN F20 [get_ports pps_ext]\n"
+       "set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]\n"
+       "set_property PULLDOWN TRUE [get_ports pps_ext]\n") if hwlatch else ""
 regen(pdir + "/system_constr.xdc",
-      "# ---- pps_counter CDC (added by docker-build-inner.sh) ----", """
-# NOTE: target cells (not pins) with bracket-free patterns -- in a TCL -filter
-# NAME=~, "reg[*]" is a character class (matches zero), so the bus index must be
-# covered by a trailing "*". set_false_path -to <cell> applies to its data input.
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]
-# PPS external input: F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V). PULLDOWN so
-# an unconnected pin reads 0 (no phantom PPS). DRIVE WITH <=1.8V (level-shift the
-# 3.3V GPS PPS before this pin AND before MIO9!).
-set_property PACKAGE_PIN F20 [get_ports pps_ext]
-set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]
-set_property PULLDOWN TRUE [get_ports pps_ext]
-""")
+      "# ---- pps_counter CDC (added by docker-build-inner.sh) ----", cdc + pin)
 
 if changed:
     open("/tmp/pps_changed", "w").write("1")
