@@ -39,7 +39,11 @@ docker build -t "$IMAGE" .
 VIVADO_MOUNT=""
 if [ -n "$VIVADO_HOST" ]; then
     echo "[*] Mounting Vivado from: $VIVADO_HOST (same path in container)"
-    VIVADO_MOUNT="-v ${VIVADO_HOST}:${VIVADO_HOST}:ro -e VIVADO_PATH=${VIVADO_HOST}"
+    # --tmpfs /sys: Vivado's WebTalk/license host-scan calls libudev
+    # udev_enumerate_scan_devices, which corrupts the heap scanning the
+    # container's /sys (crashes on 20.04 and 22.04 alike). An empty tmpfs /sys
+    # gives it nothing to choke on.
+    VIVADO_MOUNT="-v ${VIVADO_HOST}:${VIVADO_HOST}:ro -e VIVADO_PATH=${VIVADO_HOST} --tmpfs /sys"
 fi
 
 echo "[*] Starting build container (logging to build.log)..."
