@@ -418,17 +418,31 @@ else:
     print(f"  Makefile patched ({n} git describe call(s) → v0.39 fallback)")
 PYEOF
 
-# ---- Build ----
-info "Starting build ($(nproc) cores)..."
-make -j$(nproc) 2>&1 | tee /build/output/build.log
+# ---- Build (Option B: pluto.frm only; skip the Vitis/xsct FSBL + boot.frm) ----
+# The FSBL/boot.frm path needs Vitis xsct + a headless Eclipse/Xvfb stack that is
+# brittle in a container. A PL-only design loads its bitstream from pluto.frm's
+# FIT and the FSBL/PS config is unchanged, so we:
+#   1) build (Vivado) or download the XSA,
+#   2) extract system_top.bit from it ourselves (the stock rule couples that with
+#      the xsct FSBL step, which we skip), touch it so make won't rebuild it,
+#   3) build only pluto.frm + the DFU images.
+# The stock boot.frm in ./output is reused for flashing (PS/FSBL unchanged).
+# NOTE: after changing the HDL (e.g. adding the counter), force an XSA rebuild
+#       with: rm build/system_top.xsa
+info "Starting build ($(nproc) cores) — Option B (pluto.frm; no FSBL/boot.frm)..."
+(
+    make -j"$(nproc)" build/system_top.xsa \
+    && unzip -o build/system_top.xsa system_top.bit -d build \
+    && touch build/system_top.bit \
+    && make -j"$(nproc)" build/pluto.frm build/pluto.dfu build/uboot-env.dfu
+) 2>&1 | tee /build/output/build.log
 BUILD_EXIT=${PIPESTATUS[0]}
 
-# Copy firmware to output volume (always run, even if make partially failed)
-cp build/pluto.frm  /build/output/ 2>/dev/null && info "  pluto.frm -> /build/output/" || true
-cp build/boot.frm   /build/output/ 2>/dev/null && info "  boot.frm  -> /build/output/" || true
-cp build/pluto.dfu  /build/output/ 2>/dev/null || true
-cp build/boot.dfu   /build/output/ 2>/dev/null || true
-cp build/*.zip      /build/output/ 2>/dev/null || true
+# Copy firmware to output volume. boot.frm is intentionally NOT rebuilt here —
+# the stock boot.frm already in ./output is reused for flashing.
+cp build/pluto.frm     /build/output/ 2>/dev/null && info "  pluto.frm     -> /build/output/" || true
+cp build/pluto.dfu     /build/output/ 2>/dev/null && info "  pluto.dfu     -> /build/output/" || true
+cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /build/output/" || true
 
 [ $BUILD_EXIT -ne 0 ] && die "Build failed with exit code $BUILD_EXIT" || true
 
