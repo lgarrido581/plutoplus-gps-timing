@@ -65,15 +65,6 @@ fi
 if (( HAVE_VIVADO )); then
     mkdir -p "$HOME/.Xilinx/Vivado"
     printf 'catch { config_webtalk -user off }\n' > "$HOME/.Xilinx/Vivado/Vivado_init.tcl"
-
-    # The cached buildroot host-fakeroot was built on 20.04 glibc; fakeroot hooks
-    # versioned glibc symbols, so it mis-fakes mknod on 22.04 ("Operation not
-    # permitted" building rootfs.cpio). Force a one-time rebuild so it's native.
-    if [ -d buildroot/output/build ]; then
-        rm -rf buildroot/output/build/host-fakeroot-* \
-               buildroot/output/host/bin/fakeroot \
-               buildroot/output/host/bin/faked 2>/dev/null || true
-    fi
 fi
 
 # ---- Clone ----
@@ -378,6 +369,16 @@ info "  post-build: gps-post-build.sh created (removes serial getty)"
 if [ -d buildroot/output/build ]; then
     rm -rf buildroot/output/build/chrony-* buildroot/output/build/gpsd-* 2>/dev/null || true
     info "  forced chrony + gpsd rebuild (PPS support + /dev/ttyPS0 + overlay)"
+    # host-fakeroot hooks versioned glibc symbols; one built on 20.04 mis-fakes
+    # mknod on the 22.04 base ("Operation not permitted" building rootfs.cpio).
+    # Force a rebuild so it is native to the current base.
+    if [ ! -f buildroot/output/.fakeroot_rebuilt_2204 ]; then
+        rm -rf buildroot/output/build/host-fakeroot-* \
+               buildroot/output/host/bin/fakeroot \
+               buildroot/output/host/bin/faked 2>/dev/null || true
+        touch buildroot/output/.fakeroot_rebuilt_2204
+        info "  forced host-fakeroot rebuild (22.04 glibc)"
+    fi
 fi
 
 # ---- Fix VERSION and LATEST_TAG (both use git describe; fail on shallow clone) ----
