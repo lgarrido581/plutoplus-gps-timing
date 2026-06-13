@@ -37,6 +37,7 @@ module pps_counter #(
     input  wire                              cnt_clk,     // e.g. AD936x sample clk
     input  wire                              cnt_resetn,  // active-low reset
     input  wire                              pps_in,      // optional PPS (tie 0 if unused)
+    output wire [1:0]                        gpio_out,    // CTRL[5:4]: test outputs (I/O voltage probe)
 
     // ---- AXI4-Lite slave (FCLK / s_axi_aclk domain) ----
     input  wire                              s_axi_aclk,
@@ -67,6 +68,8 @@ module pps_counter #(
     // ----------------------------------------------------------------- //
     reg        ctrl_enable = 1'b1;
     reg        ctrl_clear  = 1'b0;     // pulse
+    reg  [1:0] ctrl_gpio   = 2'b00;    // CTRL[5:4] -> gpio_out (I/O voltage test)
+    assign     gpio_out    = ctrl_gpio;
     reg  [1:0] en_sync, clr_sync;
     always @(posedge cnt_clk) begin
         en_sync  <= {en_sync[0],  ctrl_enable};
@@ -139,7 +142,7 @@ module pps_counter #(
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
             s_axi_awready <= 0; s_axi_wready <= 0; s_axi_bvalid <= 0;
-            s_axi_bresp <= 0; ctrl_enable <= 1'b1; ctrl_clear <= 1'b0;
+            s_axi_bresp <= 0; ctrl_enable <= 1'b1; ctrl_clear <= 1'b0; ctrl_gpio <= 2'b00;
         end else begin
             ctrl_clear <= 1'b0;  // auto-clear pulse
             // address latch
@@ -154,6 +157,7 @@ module pps_counter #(
                 if (awaddr_q[5:2] == 4'h1) begin     // 0x04 CTRL
                     ctrl_enable <= s_axi_wdata[0];
                     ctrl_clear  <= s_axi_wdata[1];
+                    ctrl_gpio   <= s_axi_wdata[5:4];
                 end
                 s_axi_bvalid <= 1'b1; s_axi_bresp <= 2'b00;
             end else if (s_axi_bvalid && s_axi_bready) s_axi_bvalid <= 1'b0;
@@ -173,7 +177,7 @@ module pps_counter #(
                 s_axi_rvalid <= 1'b1; s_axi_rresp <= 2'b00;
                 case (s_axi_araddr[5:2])
                     4'h0: s_axi_rdata <= 32'h50505343;     // "PPSC"
-                    4'h1: s_axi_rdata <= {31'd0, ctrl_enable};
+                    4'h1: s_axi_rdata <= {26'd0, ctrl_gpio, 2'b00, ctrl_enable};
                     4'h2: s_axi_rdata <= {31'd0, pps_present};
                     4'h3: s_axi_rdata <= live_count;
                     4'h4: s_axi_rdata <= ppsc_s2;

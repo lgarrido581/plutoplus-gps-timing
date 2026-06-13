@@ -18,9 +18,12 @@ VIVADO_HOST=""
 docker volume create plutoplus-src-cache &>/dev/null
 
 # Parse args
+EXTRA_ENV=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --vivado) VIVADO_HOST="$2"; shift 2 ;;
+        --gpio-test) EXTRA_ENV="$EXTRA_ENV -e PPS_GPIO_TEST=1"; shift ;;  # I/O voltage test build -> pluto-gpiotest.frm
+        --hwlatch)   EXTRA_ENV="$EXTRA_ENV -e PPS_HWLATCH=1";   shift ;;  # hardware-latch (F20 PPS input)
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -53,5 +56,6 @@ docker run --rm \
     -v "plutoplus-src-cache:/build/src" \
     -v "$(pwd)/hdl:/build/hdl-src:ro" \
     $VIVADO_MOUNT \
+    $EXTRA_ENV \
     --name plutoplus-gps-build \
     "$IMAGE" 2>&1 | tee build.log

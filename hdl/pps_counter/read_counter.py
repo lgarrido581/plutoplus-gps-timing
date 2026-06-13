@@ -20,12 +20,31 @@ m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE,
 def rd(off):
     return struct.unpack("<I", m[off:off+4])[0]
 
+def wr(off, val):
+    m[off:off+4] = struct.pack("<I", val & 0xFFFFFFFF)
+
 ident = rd(0x00)
 if ident != 0x50505343:  # "PPSC"
     print(f"ERROR: ID=0x{ident:08X}, expected 0x50505343 ('PPSC'). "
           f"Is the counter in this bitstream / is the address right?")
     sys.exit(1)
 print("pps_counter present (ID='PPSC') @ 0x%08X" % BASE)
+
+if "--gpio" in sys.argv:
+    # I/O voltage test (pluto-gpiotest.frm only): drive F20/F19 high/low via
+    # CTRL[5:4], then measure the pin with a DMM (high == bank-35 VCCO).
+    #   python3 read_counter.py --gpio f20 1     # drive F20 high
+    #   python3 read_counter.py --gpio f19 0     # drive F19 low
+    i = sys.argv.index("--gpio")
+    bit = {"f20": 4, "0": 4, "f19": 5, "1": 5}[sys.argv[i+1].lower()]
+    val = int(sys.argv[i+2])
+    cur = rd(0x04)
+    cur = (cur | (1 << bit)) if val else (cur & ~(1 << bit))
+    wr(0x04, cur | 0x1)                       # keep counter enabled (bit0)
+    c = rd(0x04)
+    print(f"CTRL=0x{c:08X}  F20(bit4)={'HIGH' if c & 0x10 else 'low'}  "
+          f"F19(bit5)={'HIGH' if c & 0x20 else 'low'}")
+    sys.exit(0)
 
 if "--mon" in sys.argv:
     # Sample LIVE_COUNT once per second -> delta == AD936x sample-clock Hz.

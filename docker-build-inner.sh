@@ -429,7 +429,12 @@ if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_cou
     # this near-full xc7z010-1). Default 0 -> software latch (LIVE_COUNT only),
     # prunes that logic for far better timing. Toggle via env in docker-run.sh.
     PPS_HWLATCH="${PPS_HWLATCH:-0}"
-    info "Integrating pps_counter into the Pluto block design (HW-latch=$PPS_HWLATCH)..."
+    # PPS_GPIO_TEST=1 -> I/O voltage test build: drive F20/F19 (bank 35) as
+    # software-toggleable OUTPUTS (via pps_counter CTRL[5:4]) so the bank VCCO can
+    # be measured. Mutually exclusive with HW-latch; output is pluto-gpiotest.frm.
+    PPS_GPIO_TEST="${PPS_GPIO_TEST:-0}"
+    [ "$PPS_GPIO_TEST" = "1" ] && PPS_HWLATCH=0
+    info "Integrating pps_counter into the Pluto block design (HW-latch=$PPS_HWLATCH, gpio-test=$PPS_GPIO_TEST)..."
     rm -f /tmp/pps_changed
     HDL_CHANGED=0
     if ! cmp -s /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v 2>/dev/null; then
@@ -437,30 +442,35 @@ if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_cou
         HDL_CHANGED=1
         info "  pps_counter.v -> hdl/projects/pluto/"
     fi
-    PPS_HWLATCH="$PPS_HWLATCH" python3 - << 'PYEOF'
+    PPS_HWLATCH="$PPS_HWLATCH" PPS_GPIO_TEST="$PPS_GPIO_TEST" python3 - << 'PYEOF'
 import os
 pdir = "hdl/projects/pluto"
-hwlatch = os.environ.get("PPS_HWLATCH", "0") == "1"
+hwlatch  = os.environ.get("PPS_HWLATCH", "0") == "1"
+gpiotest = os.environ.get("PPS_GPIO_TEST", "0") == "1"
 changed = False
 
-# system_top.v: add/remove the pps_ext top-level port to match the mode
+# system_top.v: normalize the extra top-level port to match the mode (strip any
+# prior pps_ext/pps_gpio addition, then add the one this mode needs).
 stv = pdir + "/system_top.v"
 s = open(stv).read()
-has = "pps_ext" in s
-if hwlatch and not has:
-    s = s.replace("  inout           pl_gpio4\n);",
-                  "  inout           pl_gpio4,\n  input           pps_ext\n);", 1)
-    s = s.replace("    .gpio_i (gpio_i),\n",
-                  "    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n", 1)
-    open(stv, "w").write(s); changed = True
-    print("  system_top.v: pps_ext port added (hardware latch)")
-elif not hwlatch and has:
-    s = s.replace("  inout           pl_gpio4,\n  input           pps_ext\n);",
-                  "  inout           pl_gpio4\n);", 1)
-    s = s.replace("    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n",
-                  "    .gpio_i (gpio_i),\n", 1)
-    open(stv, "w").write(s); changed = True
-    print("  system_top.v: pps_ext port removed (software latch)")
+s2 = s
+s2 = s2.replace(",\n  input           pps_ext\n);", "\n);")
+s2 = s2.replace(",\n  output [1:0]    pps_gpio\n);", "\n);")
+s2 = s2.replace("    .pps_ext (pps_ext),\n", "")
+s2 = s2.replace("    .pps_gpio (pps_gpio),\n", "")
+if hwlatch:
+    s2 = s2.replace("  inout           pl_gpio4\n);",
+                    "  inout           pl_gpio4,\n  input           pps_ext\n);", 1)
+    s2 = s2.replace("    .gpio_i (gpio_i),\n",
+                    "    .gpio_i (gpio_i),\n    .pps_ext (pps_ext),\n", 1)
+elif gpiotest:
+    s2 = s2.replace("  inout           pl_gpio4\n);",
+                    "  inout           pl_gpio4,\n  output [1:0]    pps_gpio\n);", 1)
+    s2 = s2.replace("    .gpio_i (gpio_i),\n",
+                    "    .gpio_i (gpio_i),\n    .pps_gpio (pps_gpio),\n", 1)
+if s2 != s:
+    open(stv, "w").write(s2); changed = True
+    print("  system_top.v: normalized (hwlatch=%d gpiotest=%d)" % (hwlatch, gpiotest))
 
 def regen(path, marker, block):
     global changed
@@ -474,6 +484,8 @@ def regen(path, marker, block):
 
 pps_conn = ("create_bd_port -dir I pps_ext\nad_connect pps_ext pps_counter_0/pps_in\n"
             if hwlatch else "ad_connect GND pps_counter_0/pps_in\n")
+gpio_conn = ("create_bd_port -dir O -from 1 -to 0 pps_gpio\n"
+             "ad_connect pps_counter_0/gpio_out pps_gpio\n" if gpiotest else "")
 regen(pdir + "/system_bd.tcl",
       "# ---- GPS timing counter (added by docker-build-inner.sh) ----",
       "\nadd_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v\n"
@@ -481,7 +493,7 @@ regen(pdir + "/system_bd.tcl",
       "create_bd_cell -type module -reference pps_counter pps_counter_0\n"
       "ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk\n"
       "ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn\n"
-      + pps_conn +
+      + pps_conn + gpio_conn +
       "ad_cpu_interconnect 0x7C460000 pps_counter_0\n")
 
 # CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
@@ -497,11 +509,21 @@ cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/in
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]\n")
-pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
-       "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"
-       "set_property PACKAGE_PIN F20 [get_ports pps_ext]\n"
-       "set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]\n"
-       "set_property PULLDOWN TRUE [get_ports pps_ext]\n") if hwlatch else ""
+if hwlatch:
+    pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
+           "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"
+           "set_property PACKAGE_PIN F20 [get_ports pps_ext]\n"
+           "set_property IOSTANDARD LVCMOS18 [get_ports pps_ext]\n"
+           "set_property PULLDOWN TRUE [get_ports pps_ext]\n")
+elif gpiotest:
+    # I/O voltage test outputs. Declared LVCMOS18 (safe); the measured HIGH equals
+    # the bank-35 VCCO regardless -> tells you 1.8V vs 3.3V. F20=IO_L15N_T2_35,
+    # F19=IO_L15P_T2_35. Driven by pps_counter CTRL[5:4] -> pps_gpio[1:0].
+    pin = ("set_property PACKAGE_PIN F20 [get_ports {pps_gpio[0]}]\n"
+           "set_property PACKAGE_PIN F19 [get_ports {pps_gpio[1]}]\n"
+           "set_property IOSTANDARD LVCMOS18 [get_ports {pps_gpio[*]}]\n")
+else:
+    pin = ""
 regen(pdir + "/system_constr.xdc",
       "# ---- pps_counter CDC (added by docker-build-inner.sh) ----", cdc + pin)
 
@@ -577,9 +599,12 @@ info "Starting build ($(nproc) cores) — Option B (pluto.frm; no FSBL/boot.frm)
 BUILD_EXIT=${PIPESTATUS[0]}
 
 # Copy firmware to output volume. boot.frm is intentionally NOT rebuilt here —
-# the stock boot.frm already in ./output is reused for flashing.
-cp build/pluto.frm     /build/output/ 2>/dev/null && info "  pluto.frm     -> /build/output/" || true
-cp build/pluto.dfu     /build/output/ 2>/dev/null && info "  pluto.dfu     -> /build/output/" || true
+# the stock boot.frm already in ./output is reused for flashing. The I/O voltage
+# test build is named pluto-gpiotest.frm so it never clobbers the counter firmware.
+FRM_OUT="pluto.frm"; DFU_OUT="pluto.dfu"
+if [ "${PPS_GPIO_TEST:-0}" = "1" ]; then FRM_OUT="pluto-gpiotest.frm"; DFU_OUT="pluto-gpiotest.dfu"; fi
+cp build/pluto.frm     "/build/output/$FRM_OUT" 2>/dev/null && info "  $FRM_OUT -> /build/output/" || true
+cp build/pluto.dfu     "/build/output/$DFU_OUT" 2>/dev/null && info "  $DFU_OUT -> /build/output/" || true
 cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /build/output/" || true
 
 [ $BUILD_EXIT -ne 0 ] && die "Build failed with exit code $BUILD_EXIT" || true
