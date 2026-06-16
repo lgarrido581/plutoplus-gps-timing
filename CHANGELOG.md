@@ -2,6 +2,19 @@
 
 All notable changes to this project. Versions are git tags.
 
+## Unreleased — FPGA GPS-timing counter
+- **Vivado-in-Docker build path:** `docker-run.sh --vivado <XilinxPath>` rebuilds the FPGA bitstream
+  in-container and repackages it into `pluto.frm`, reusing the stock `boot.frm` (PL-only "Option B"
+  flow — no Vitis/FSBL). Fixes for the headless Vivado run (libudev `/sys`, fakeroot, cached XSA).
+- **`pps_counter` IP** (`hdl/pps_counter/`): AXI-Lite counter on the AD936x sample clock at
+  `0x7C460000`, with software-latch (`LIVE_COUNT`) and optional hardware **PPS latch** for
+  `xo_correction` / TDOA. Auto-integrated into the Pluto block design by `docker-build-inner.sh`.
+- **Build flags:** `--hwlatch` (F20 PPS input, ns latch) and `--gpio-test` (drive F20/F19 to validate
+  bank-35 I/O voltage → `pluto-gpiotest.frm`). On-device tooling via `devmem` + `read_counter.py`.
+- **Known limitation:** the near-full xc7z010-1 leaves a ~-2.5 ns setup violation in AD9361
+  *config-write* paths (tolerated; pending hardware validation). The counter + RF datapath close.
+- **Documented I/O levels (Pluto+ V2):** PL banks (F20/F19) = 1.8 V; PS MIO bank 500 (MIO9) = 3.3 V.
+
 ## v1.2
 - **NTP/IPv6 fix:** also allow **IPv6 link-local** clients (`allow fe80::/10`). The v1.1 allow list
   was IPv4-only, so NTP queries that resolved to the Pluto's `fe80::` address (the common case over

@@ -14,7 +14,7 @@ It is built **entirely in Docker** on top of [`sardylan/plutoplus`](https://gith
 > `chronyc tracking` reports `Leap status: Normal`, reference ID `PPS`, with system time within a
 > few hundred nanoseconds of GPS once the receiver holds a fix.
 
-**Docs:** [Wiring](docs/WIRING.md) · [Recovery / un-brick](RECOVERY.md) · [TDOA tooling](tdoa/README.md) · [Changelog](CHANGELOG.md)
+**Docs:** [Wiring](docs/WIRING.md) · [Recovery / un-brick](RECOVERY.md) · [FPGA timing counter](hdl/pps_counter/README.md) · [TDOA tooling](tdoa/README.md) · [Changelog](CHANGELOG.md)
 
 > ⚠️ **Read [`RECOVERY.md`](RECOVERY.md) before you flash.** The Pluto+ QSPI flash is *unprotected*
 > and is easily corrupted by an interrupted write. Recovery is straightforward via SD‑card boot, but
@@ -58,8 +58,13 @@ It is built **entirely in Docker** on top of [`sardylan/plutoplus`](https://gith
 ├── Dockerfile              # Build environment (Ubuntu + cross tools + deps)
 ├── docker-run.sh           # Builds the image and runs the build (entry point)
 ├── docker-build-inner.sh   # Runs INSIDE the container: clone, patch, configure, build
+├── hdl/pps_counter/        # FPGA GPS-timing counter IP + on-device tools (see below)
+├── tdoa/                   # GPS-timestamped IQ capture + TDOA roadmap
+├── docs/WIRING.md          # GPS module wiring detail
+├── case/                   # 3D-printable GPS antenna bracket + BOM
 ├── README.md
 ├── RECOVERY.md             # Un-brick / first-time bootloader flashing via SD boot
+├── CHANGELOG.md
 ├── LICENSE
 └── output/                 # (gitignored) firmware images land here after a build
 ```
@@ -235,6 +240,42 @@ server pluto.local iburst
 **Misc**
 - Patches the `plutosdr-fw` Makefile so `git describe` has a `v0.39` fallback (shallow clone).
 - Forces `chrony`/`gpsd` to rebuild so the config changes take effect.
+
+---
+
+## GPS‑disciplined *sample* timing — FPGA counter (advanced / experimental)
+
+The sections above give GPS‑disciplined **system** time. For **sample‑accurate** timing
+(`xo_correction` clock discipline and **TDOA**), this repo can also build a custom FPGA peripheral,
+**`pps_counter`** — a free‑running counter on the AD936x **sample clock**, exposed over AXI‑Lite at
+**`0x7C460000`**, with an optional hardware **PPS latch**. Full design + register map in
+[`hdl/pps_counter/README.md`](hdl/pps_counter/README.md).
+
+This path **requires Vivado 2023.2** (mounted into the container) because it rebuilds the FPGA
+bitstream. The bitstream is repackaged into `pluto.frm`; the stock `boot.frm` is reused unchanged
+(PL‑only design), so no Vitis/FSBL is needed (“Option B” build).
+
+```bash
+# build pluto.frm WITH the counter (mount your Vivado install at its real path):
+bash docker-run.sh --vivado /home/you/Xilinx
+bash docker-run.sh --vivado /home/you/Xilinx --hwlatch     # + F20 hardware PPS latch (ns)
+bash docker-run.sh --vivado /home/you/Xilinx --gpio-test   # I/O voltage test -> pluto-gpiotest.frm
+```
+
+Read it on the device with **`devmem`** (no Python needed):
+```sh
+devmem 0x7C460000 32     # 0x50505343 ("PPSC") = counter present
+devmem 0x7C46000C 32     # LIVE_COUNT — increments; sample-clock count for xo_correction
+```
+
+> **Status:** builds and runs; the counter (and the RF sample datapath) close timing. Because the
+> xc7z010‑**1** is nearly full, adding the AXI slave leaves a **~‑2.5 ns setup violation in AD9361
+> *config‑write* paths** (not the datapath, not the counter) — tolerated by a build‑flow override,
+> **pending on‑hardware validation** that RF tuning is unaffected. `pps_counter` itself meets timing.
+>
+> **I/O levels (Pluto+ V2):** PL banks (incl. **F20/F19**) are **1.8 V** (AD936x `VDD_INTERFACE`);
+> PS MIO bank 500 (incl. **MIO9**) is **3.3 V**. A 3.3 V GPS PPS is fine on MIO9 but must be
+> level‑shifted to 1.8 V for the F20 hardware latch.
 
 ---
 
