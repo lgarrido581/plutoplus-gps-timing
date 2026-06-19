@@ -36,6 +36,11 @@ XO_MIN=39992000                  # from xo_correction_available
 XO_MAX=40008000
 ITERS="${1:-0}"                  # 0 = forever
 
+# Poll loops below wait for PPS_SEQ to change (once/sec). Without a sleep they
+# fork devmem in a tight loop and peg a CPU core. Use a fractional sleep; fall
+# back to 1s if this busybox lacks fractional sleep (still kills the busy-loop).
+if sleep 0.1 2>/dev/null; then NAP="sleep 0.2"; else NAP="sleep 1"; fi
+
 log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
 [ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); is this the --hwlatch build with PPS on F20?"; exit 1; }
@@ -49,12 +54,14 @@ avg_delta() {  # average AVG latched deltas (one per new PPS edge)
             d=$(devmem $DELTA 32)
             sum=$((sum + $((d))))
             ps="$s"; i=$((i + 1))
+        else
+            $NAP
         fi
     done
     echo $((sum / AVG))
 }
 settle() {  # discard N edges after an xo write (PLL relock transient)
-    k=0; while [ "$k" -lt "${1:-2}" ]; do s=$(devmem $SEQ 32); [ "$s" != "$ps" ] && { ps="$s"; k=$((k + 1)); }; done
+    k=0; while [ "$k" -lt "${1:-2}" ]; do s=$(devmem $SEQ 32); if [ "$s" != "$ps" ]; then ps="$s"; k=$((k + 1)); else $NAP; fi; done
 }
 
 HEARTBEAT="${HEARTBEAT:-450}"   # log a "holding" heartbeat every N held cycles
