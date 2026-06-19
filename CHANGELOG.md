@@ -2,7 +2,17 @@
 
 All notable changes to this project. Versions are git tags.
 
-## Unreleased — FPGA GPS-timing counter
+## Unreleased — Networked TDOA (Phase 2)
+- **`docs/NETWORK.md`:** architecture for a multi-site passive-localization network — Jetson Nano
+  edge nodes (Pluto+ over libiio) on a **Tailscale** tailnet reporting to a cloud coordinator.
+  Decisions: **hybrid** compute (edge GPU reduce on the Nano → cloud TDOA fusion) and a
+  **transport-agnostic** cloud target (self-hosted VPS *or* managed object storage behind one
+  `push()` interface). The Pluto stays off Tailscale (fragile QSPI); the Nano is the only tailnet
+  node. Tailscale is transport, not a time source — per-site GPS keeps WAN jitter out of timing.
+- **`tdoa/node/bringup.sh`:** per-site bring-up — installs/links Tailscale on the Nano, verifies the
+  Pluto over libiio (+ surfaces its chrony/PPS health), and smoke-tests cloud reachability.
+
+## v1.3 — FPGA GPS-timing counter
 - **Vivado-in-Docker build path:** `docker-run.sh --vivado <XilinxPath>` rebuilds the FPGA bitstream
   in-container and repackages it into `pluto.frm`, reusing the stock `boot.frm` (PL-only "Option B"
   flow — no Vitis/FSBL). Fixes for the headless Vivado run (libudev `/sys`, fakeroot, cached XSA).
