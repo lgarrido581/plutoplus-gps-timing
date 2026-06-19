@@ -64,6 +64,21 @@ Priorities are ordered roughly by impact-for-effort.
 - **Common-view cross-validation.** Periodically compare two nodes' timing against
   a shared visible reference to catch a silently-bad GPS/timing node.
 
+## GPS-scheduled TX/RX & coordination
+
+- **PPS-synced TDD** — feed the F20 PPS into `axi_tdd_0/sync_in` so the (already
+  DMA-gating) TDD frame is GPS-aligned → deterministic, repeating, node-coordinated
+  RX capture and DAC waveform playback. ~1 BD wire. *(low effort)*
+- **Compare-trigger IP** — extend `pps_counter` with a `TARGET`/`arm` compare that
+  fires at an absolute GPS sample-time → one-shot scheduled events (two-way
+  ranging, "TX at 12:00:00.000 GPS"). *(small new HDL)*
+- **Coherent-on-receive** — estimate/correct residual inter-node carrier phase in
+  post-processing on GPS-timestamped IQ. Achievable; big sensitivity/localization win.
+- **Coherent TX beamforming** — long-horizon; needs a shared phase reference
+  (distributed LO / White Rabbit) or closed-loop phase cal + RTK positions. *(research)*
+
+Design + register sketch + the full beamforming requirements: **[SCHEDULING.md](SCHEDULING.md)**.
+
 ## Hardware upgrade paths
 
 - **External 10 MHz / 1PPS reference input** (OCXO/Rb GPSDO) → holdover + orders-of-
