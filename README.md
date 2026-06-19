@@ -15,7 +15,8 @@ no local Xilinx install is needed for the base firmware.
 
 **Docs:** [Wiring](docs/WIRING.md) · [Verify/NTP serving](docs/NTP.md) · [Gotchas](docs/GOTCHAS.md) ·
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
-[Metrics](hdl/pps_counter/metrics/README.md) · [Networked TDOA](docs/NETWORK.md) ·
+[Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
+[Networked TDOA](docs/NETWORK.md) · [Roadmap](docs/ROADMAP.md) ·
 [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
 
 ---
