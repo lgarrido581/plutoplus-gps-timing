@@ -83,25 +83,38 @@ matching `boot.frm` first — [`RECOVERY.md`](RECOVERY.md).
 
 ## Verify it's working
 
-SSH in (`ssh root@pluto.local`, password `analog`) with the GPS connected and a sky view:
+SSH in (`ssh root@pluto.local`, password `analog`) with the GPS connected and a clear sky view.
 
+> **✅ It's working when** `chronyc tracking` shows **Stratum 1** + **`Leap status: Normal`** — and,
+> on the `--hwlatch` build, `devmem 0x7C460008 32` returns **`0x00000001`**.
+
+Step through it; each line shows the **expected result**:
+
+**1. Services + device nodes**
 ```sh
-# services + devices up
-ps -ef | grep -E 'gpsd|chronyd' | grep -v grep   # both running
-ls -l /dev/pps0 /dev/ttyPS0                        # both present
+ps -ef | grep -E 'gpsd|chronyd' | grep -v grep   # -> one gpsd line + one chronyd line
+ls -l /dev/pps0 /dev/ttyPS0                        # -> both nodes exist
+```
 
-# GPS fix (needs sky view, >=4 sats)
-gpsmon                       # SNR bars + fix status (run bare, NOT 'gpsmon /dev/ttyPS0' — gpsd owns it)
+**2. GPS fix** (needs sky view + ≥4 sats; can take a few minutes from cold)
+```sh
+gpsmon            # run BARE (gpsd owns ttyPS0). Good = sat SNRs climb into the 30s+,
+                  # Status flips to 'A', Quality > 0. SNR ~0 on all sats = antenna not
+                  # receiving -> see Gotchas.
+```
 
-# once it has a fix — system clock disciplined
-ppstest /dev/pps0            # ~1 assert/sec
-chronyc sources -v           # PPS refclock gets '*' when locked
-chronyc tracking             # Stratum 1, Leap status: Normal
+**3. System clock disciplined** (once fixed)
+```sh
+ppstest /dev/pps0     # -> "assert" lines, ~one per second
+chronyc sources -v    # -> the PPS line shows '*' (selected) and Reach 377
+chronyc tracking      # -> Stratum: 1 | Reference ID: ...(PPS) | Leap status: Normal
+```
 
-# FPGA sample-clock counter (--hwlatch build only)
-devmem 0x7C460000 32         # 0x50505343 ("PPSC") = counter present
-devmem 0x7C460008 32         # 0x1 = hardware PPS latch capturing (after lock)
-cat /var/log/xocorrect.log   # discipline loop converging PPS_DELTA -> 30,720,000
+**4. FPGA sample-clock discipline** (`--hwlatch` build only)
+```sh
+devmem 0x7C460000 32        # -> 0x50505343   ("PPSC" = counter present)
+devmem 0x7C460008 32        # -> 0x00000001   (hardware PPS latch capturing; after GPS lock)
+cat /var/log/xocorrect.log  # -> "locked, holding ... delta=30720000" (offset ~0 ppm)
 ```
 
 **No fix?** Almost always antenna/reception (SNR ≈ 0 = antenna not really receiving) — see
