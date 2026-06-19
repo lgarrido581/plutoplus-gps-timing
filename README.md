@@ -35,6 +35,29 @@ no local Xilinx install is needed for the base firmware.
 except the FPGA counter; the **`--hwlatch`** firmware adds the sample‑clock counter + auto‑discipline
 and rebuilds the bitstream (needs Vivado 2023.2). See [Build details](docs/BUILD.md).
 
+## How this compares
+
+This is a **software GPSDO built into an SDR**: it disciplines the Pluto's own TCXO sample clock to
+GPS (and serves stratum‑1 NTP), rather than being a separate box that outputs a 10 MHz/1PPS reference.
+
+| Approach | ~Cost | Discipline & stability | Holdover | GPS‑timestamped IQ (TDOA) | Stratum‑1 NTP |
+|---|---|---|---|---|---|
+| **This — Pluto+ + this firmware** | **$150–250** | software `xo_correction`, TCXO (~2e‑8 @1 s, ±33 ns/sample) | none | ✅ native | ✅ |
+| Dedicated OCXO/Rb GPSDO (Leo Bodnar, Thunderbolt, Jackson Labs) | $100–1000+ | hardware OCXO/Rb (~1e‑11–1e‑12 @1 s) | hours–days | ❌ (outputs 10 MHz/1PPS for *other* gear) | ❌ (needs a host) |
+| USRP / high‑end SDR + GPSDO option | $1000+ | hardware OCXO, locked sample clock | good | ✅ | ⚠️ via host |
+| Raspberry Pi + GPS HAT | ~$60 | system clock only (no RF clock) | none | ❌ no SDR | ✅ |
+
+**Where it wins:** one cheap, self‑contained board that is *simultaneously* a stratum‑1 NTP server
+**and** an SDR whose **sample clock is referenced to GPS** — so you get sample‑accurate,
+GPS‑timestamped IQ for **multi‑site TDOA** with no external GPSDO, no 10 MHz cabling, and no separate
+NTP host. The firmware is fully open and reproducible.
+
+**Where it doesn't:** it's TCXO‑class, software‑disciplined timing — short‑term stability (~2e‑8 ADEV
+@1 s, ±33 ns/sample) is orders of magnitude off a lab OCXO/Rb GPSDO, and there is **no holdover**
+(lose GPS → lose discipline within seconds). For lab‑grade frequency reference or GPS‑outage
+ride‑through, feed an OCXO/Rb GPSDO into the Pluto+ external‑reference input instead of (or alongside)
+this.
+
 ## Hardware
 
 - **Pluto+ board** (V2 / 3V3 levels — SD slot + Ethernet ⇒ it's a Pluto+, not a stock ADALM‑Pluto).
