@@ -268,10 +268,12 @@ devmem 0x7C460000 32     # 0x50505343 ("PPSC") = counter present
 devmem 0x7C46000C 32     # LIVE_COUNT — increments; sample-clock count for xo_correction
 ```
 
-> **Status:** builds and runs; the counter (and the RF sample datapath) close timing. Because the
-> xc7z010‑**1** is nearly full, adding the AXI slave leaves a **~‑2.5 ns setup violation in AD9361
-> *config‑write* paths** (not the datapath, not the counter) — tolerated by a build‑flow override,
-> **pending on‑hardware validation** that RF tuning is unaffected. `pps_counter` itself meets timing.
+> **Status: validated on hardware.** The `--hwlatch` build is flashed and working: the hardware PPS
+> latch captures, GPS locks (stratum‑1), and RF still tunes despite the **~‑2.5 ns setup violation in
+> AD9361 *config‑write* paths** (near‑full xc7z010‑**1**; not the datapath, not the counter) — the
+> build‑flow override is safe in practice. A userspace loop ([`xo_correct.sh`](hdl/pps_counter/xo_correct.sh))
+> disciplines the sample clock to GPS, **−7.77 ppm → +0.02 ppm**; before/after metrics and figures are
+> in [`hdl/pps_counter/metrics/`](hdl/pps_counter/metrics/).
 >
 > **I/O levels (Pluto+ V2):** PL banks (incl. **F20/F19**) are **1.8 V** (AD936x `VDD_INTERFACE`);
 > PS MIO bank 500 (incl. **MIO9**) is **3.3 V**. A 3.3 V GPS PPS is fine on MIO9 but must be

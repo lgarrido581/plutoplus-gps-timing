@@ -69,12 +69,18 @@ interface than `/dev/mem`.)
   `pluto.frm` carries the bitstream
 - ⚠️ Timing: the xc7z010-**1** is near-full; the added AXI slave pushes the ADI
   design's AD9361 **config-write** paths ~1.5 ns past closure (WNS ≈ −1.5 ns).
-  The build tolerates this (gate downgraded to a warning) so we can validate on
-  hardware. If AD9361 tuning misbehaves, do real closure (pblock the counter,
-  Performance impl strategy, or shrink the AXI footprint).
-- ☐ On-hardware validation (`read_counter.py`) + confirm GPS/RF still work
-- ☐ `xo_correction` userspace loop
-- ☐ (later) PL pin for hardware PPS latch
+  The build tolerates this (gate downgraded to a warning). **Validated on
+  hardware:** with the `--hwlatch` build flashed, the AD9361 still tunes, GPS
+  locks (stratum-1), and RF works — the config-write violation has no observed
+  effect.
+- ✅ On-hardware validation: `--hwlatch` build flashed; hardware PPS latch
+  captures (`STATUS.pps_present=1`, `PPS_SEQ` advancing). The latch is
+  quantization-limited at ±1 sample (~33 ns); see [`metrics/`](metrics/).
+- ✅ `xo_correction` userspace loop — [`xo_correct.sh`](xo_correct.sh) disciplines
+  the sample clock to GPS (−7.77 ppm → +0.02 ppm). Before/after metrics + figures
+  in [`metrics/`](metrics/).
+- ✅ PL pin for hardware PPS latch (F20) — wired and working (the `--hwlatch`
+  build; PPS level-shifted 3.3 V → 1.8 V into F20).
 
 ## On-device test
 

@@ -11,8 +11,18 @@ All notable changes to this project. Versions are git tags.
   `xo_correction` / TDOA. Auto-integrated into the Pluto block design by `docker-build-inner.sh`.
 - **Build flags:** `--hwlatch` (F20 PPS input, ns latch) and `--gpio-test` (drive F20/F19 to validate
   bank-35 I/O voltage → `pluto-gpiotest.frm`). On-device tooling via `devmem` + `read_counter.py`.
-- **Known limitation:** the near-full xc7z010-1 leaves a ~-2.5 ns setup violation in AD9361
-  *config-write* paths (tolerated; pending hardware validation). The counter + RF datapath close.
+- **Validated on hardware:** the `--hwlatch` build is flashed and working — the hardware PPS latch
+  captures (`STATUS.pps_present=1`, `PPS_SEQ` advancing), GPS still locks (stratum-1), and RF tunes
+  despite the ~-2.5 ns AD9361 *config-write* setup violation (the build-flow override is safe). The
+  latch is quantization-limited at ±1 sample (~33 ns).
+- **`xo_correction` discipline loop** (`hdl/pps_counter/xo_correct.sh`): samples the hardware-latched
+  `PPS_DELTA` against GPS and steers the ad9361 `xo_correction` knob (linear plant, −0.767 counts/Hz)
+  to null the sample-clock offset — **−7.77 ppm → +0.02 ppm**, turning an unbounded −672 ms/day drift
+  into a bounded hold. (Note: each correction triggers a PLL relock glitch of ~1 sample; a 1-count
+  deadband keeps re-tunes rare.)
+- **Metrics package** (`hdl/pps_counter/metrics/`): capture + analysis pipeline (`capture_pps_delta.sh`,
+  `capture_and_correct.sh`, `analyze.py`, `compare.py`) with before/after datasets, figures, and a
+  writeup quantifying the disciplining (frequency offset, jitter, Allan deviation, cumulative time error).
 - **Documented I/O levels (Pluto+ V2):** PL banks (F20/F19) = 1.8 V; PS MIO bank 500 (MIO9) = 3.3 V.
 
 ## v1.2
