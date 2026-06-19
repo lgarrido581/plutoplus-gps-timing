@@ -30,7 +30,9 @@ All notable changes to this project. Versions are git tags.
   to null the sample-clock offset — **−7.77 ppm → +0.02 ppm**, turning an unbounded −672 ms/day drift
   into a bounded hold. (Note: each correction triggers a PLL relock glitch of ~1 sample; a 1-count
   deadband keeps re-tunes rare.) **Autostarted** on `--hwlatch` builds by a new `S70xocorrect` init
-  script that waits for a chrony PPS lock first (no seed correction — converges from boot).
+  script that waits for a chrony PPS lock first (no seed correction — converges from boot). The
+  poll loop sleeps ~0.2 s between the 1 Hz PPS edges, so the daemon idles the CPU instead of
+  spinning a core.
 - **Metrics package** (`hdl/pps_counter/metrics/`): capture + analysis pipeline (`capture_pps_delta.sh`,
   `capture_and_correct.sh`, `analyze.py`, `compare.py`) with before/after datasets, figures, and a
   writeup quantifying the disciplining (frequency offset, jitter, Allan deviation, cumulative time error).
