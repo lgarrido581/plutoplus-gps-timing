@@ -359,6 +359,58 @@ EOF
 chmod +x "$GPS_OVL/etc/init.d/S30bootdelay"
 info "  rootfs overlay: S30bootdelay (sets u-boot bootdelay=-2) written"
 
+# xo_correction GPS-discipline daemon. Only meaningful on the --hwlatch bitstream
+# (the hardware PPS latch must see edges), so ship it only there. Ships the loop
+# (xo_correct.sh) + an init script that WAITS for a chrony PPS lock before
+# disciplining. No seed correction: TCXOs differ across boards, so it converges
+# from whatever xo_correction is at boot rather than assuming a fixed offset.
+if [ "${PPS_HWLATCH:-0}" = "1" ] && [ -f /build/hdl-src/pps_counter/xo_correct.sh ]; then
+    mkdir -p "$GPS_OVL/usr/bin"
+    cp /build/hdl-src/pps_counter/xo_correct.sh "$GPS_OVL/usr/bin/xo_correct.sh"
+    chmod +x "$GPS_OVL/usr/bin/xo_correct.sh"
+    cat > "$GPS_OVL/etc/init.d/S70xocorrect" << 'EOF'
+#!/bin/sh
+# S70xocorrect - discipline the AD936x sample clock to GPS once PPS-locked.
+DAEMON=/usr/bin/xo_correct.sh
+PIDFILE=/var/run/xocorrect.pid
+LOG=/var/log/xocorrect.log
+STATUS_REG=0x7C460008   # pps_counter STATUS; bit0 = pps_present (hw latch alive)
+
+start() {
+	# Only run on the hardware-latch bitstream (latch must capture PPS edges).
+	[ "$(devmem $STATUS_REG 32 2>/dev/null)" = "0x00000001" ] || {
+		echo "xo_correct: pps_counter HW latch not present; skipping"; return 0; }
+	printf "Starting xo_correct (waits for PPS lock): "
+	(
+		# Wait for chrony to hold a PPS lock before disciplining, so PPS_DELTA
+		# reflects true GPS seconds. exec keeps this PID == the daemon's PID.
+		while :; do
+			chronyc tracking 2>/dev/null | grep -q 'Leap status *: *Normal' && break
+			sleep 5
+		done
+		exec sh $DAEMON >> $LOG 2>&1
+	) &
+	echo $! > $PIDFILE
+	echo "OK"
+}
+stop() {
+	printf "Stopping xo_correct: "
+	[ -f $PIDFILE ] && kill "$(cat $PIDFILE)" 2>/dev/null
+	rm -f $PIDFILE
+	echo "OK"
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$GPS_OVL/etc/init.d/S70xocorrect"
+    info "  rootfs overlay: xo_correct.sh + S70xocorrect (GPS sample-clock discipline) written"
+fi
+
 # Post-build script: delete buildroot's generic serial getty from inittab so the
 # GPS UART (ttyPS0) has no login console competing with gpsd. Runs AFTER the
 # getty finalize hook. USB console (ttyGS0) is left intact.

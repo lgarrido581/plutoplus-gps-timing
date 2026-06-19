@@ -57,8 +57,9 @@ settle() {  # discard N edges after an xo write (PLL relock transient)
     k=0; while [ "$k" -lt "${1:-2}" ]; do s=$(devmem $SEQ 32); [ "$s" != "$ps" ] && { ps="$s"; k=$((k + 1)); }; done
 }
 
+HEARTBEAT="${HEARTBEAT:-450}"   # log a "holding" heartbeat every N held cycles
 log "start: NOMINAL=$NOMINAL AVG=$AVG DEADBAND=$DEADBAND xo=$(cat $XO)"
-c=0
+c=0; last=""; holdc=0
 while :; do
     d=$(avg_delta)
     err=$((d - NOMINAL))                 # +ve = clock too fast
@@ -75,8 +76,14 @@ while :; do
         echo "$nxo" > "$XO"
         log "err=${err}cnt (${ppm}ppm) delta=$d  xo:$xo->$nxo (${dxo}Hz)  -> correcting"
         settle 2
+        last=correct; holdc=0
     else
-        log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> hold (deadband)"
+        # log holds only on the lock transition + a periodic heartbeat, so a
+        # long-running daemon doesn't fill the log every cycle.
+        if [ "$last" != "hold" ] || [ $((holdc % HEARTBEAT)) -eq 0 ]; then
+            log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> locked, holding"
+        fi
+        last=hold; holdc=$((holdc + 1))
     fi
     c=$((c + 1))
     [ "$ITERS" -ne 0 ] && [ "$c" -ge "$ITERS" ] && { log "done ($c cycles); xo=$(cat $XO)"; break; }
