@@ -25,9 +25,21 @@
 #
 # Requires the --hwlatch bitstream (STATUS.pps_present==1) and a GPS PPS lock.
 #
+# HOLDOVER + timing-quality: if PPS edges stop for >=PPS_TIMEOUT s, the loop FREEZES
+# xo_correction at its last good value (the TCXO free-runs at the last-disciplined
+# frequency) and publishes a state to STATE_FILE (default /run/xo_state) that the node
+# agent / coordinator reads to weight or drop this node:
+#   LOCKED | CORRECTING | PPS_GLITCH | HOLDOVER_GOOD | HOLDOVER_DEGRADED | INVALID
+# Holdover escalates GOOD->DEGRADED->INVALID by elapsed time (HOLD_GOOD_S, HOLD_INVALID_S;
+# tune from metrics/ ADEV against your TDOA budget). On PPS return it re-acquires cleanly.
+# NOTE: the TCXO only holds fine (sub-sample) timing for ~seconds; long holdover needs an
+# external OCXO/Rb reference (see ROADMAP). State file line:
+#   state=LOCKED holdover_s=0 xo=39999704 nominal=30720000 last_delta=30720000 last_ppm=+0.000 ts=...
+#
 # Usage (on the Pluto):
 #   sh xo_correct.sh            # run forever (daemon); NOMINAL auto-derived
 #   sh xo_correct.sh 8          # run 8 update cycles then exit (for testing)
+#   HOLD_GOOD_S=5 HOLD_INVALID_S=60 STATE_FILE=/run/xo_state sh xo_correct.sh
 #   NOMINAL=61440000 sh xo_correct.sh   # pin nominal, skip auto-derive
 set -u
 
@@ -62,17 +74,33 @@ if sleep 0.1 2>/dev/null; then NAP="sleep 0.2"; else NAP="sleep 1"; fi
 
 log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
+# Timing-quality state for the node agent / coordinator (see ROADMAP holdover work).
+# States: LOCKED | CORRECTING | PPS_GLITCH | HOLDOVER_GOOD | HOLDOVER_DEGRADED | INVALID.
+# Atomic write (temp+mv) so a reader never sees a half-line. Logs on state change.
+prev_state=""
+write_state() {  # $1=state  $2=holdover_elapsed_s
+    printf 'state=%s holdover_s=%s xo=%s nominal=%s last_delta=%s last_ppm=%s ts=%s\n' \
+        "$1" "${2:-0}" "$(cat $XO 2>/dev/null)" "$NOMINAL" "${last_delta:-NA}" "${last_ppm:-NA}" "$(date +%s)" \
+        > "${STATE_FILE}.tmp" 2>/dev/null && mv "${STATE_FILE}.tmp" "$STATE_FILE" 2>/dev/null
+    # log transitions into ABNORMAL states only (LOCKED/CORRECTING are already logged by the loop)
+    if [ "$1" != "$prev_state" ]; then
+        case "$1" in LOCKED|CORRECTING) : ;; *) log "state -> $1${2:+ (holdover ${2}s)}" ;; esac
+    fi
+    prev_state="$1"
+}
+
 [ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); is this the --hwlatch build with PPS on F20?"; exit 1; }
 
 ps=""
 avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
     # Echoes the average, or "BAD" if more than REJECT_MAX outliers arrive before
     # AVG good samples (PPS missing/glitching) -> caller holds last good xo.
-    i=0; sum=0; rej=0
+    # Echoes "NOPPS" if no new edge arrives within PPS_TIMEOUT s (-> holdover).
+    i=0; sum=0; rej=0; wt=$(date +%s)
     while [ "$i" -lt "$AVG" ]; do
         s=$(devmem $SEQ 32)
         if [ "$s" != "$ps" ]; then
-            ps="$s"
+            ps="$s"; wt=$(date +%s)          # got an edge -> reset the no-PPS timer
             d=$(devmem $DELTA 32); d=$((d))
             dev=$((d - NOMINAL)); [ "$dev" -lt 0 ] && dev=$((-dev))
             if [ "$dev" -le "$MAXDEV" ]; then
@@ -83,6 +111,7 @@ avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
             fi
         else
             $NAP
+            [ $(( $(date +%s) - wt )) -ge "$PPS_TIMEOUT" ] && { echo NOPPS; return; }
         fi
     done
     echo $((sum / AVG))
@@ -127,10 +156,31 @@ if [ -n "$NOMINAL_ENV" ]; then NOMINAL="$NOMINAL_ENV"; recompute_thresholds; log
 else derive_nominal; fi
 
 HEARTBEAT="${HEARTBEAT:-450}"   # log a "holding" heartbeat every N held cycles
+# --- holdover / timing-quality (see ROADMAP "Holdover handling") ---
+PPS_TIMEOUT="${PPS_TIMEOUT:-3}"          # s with no new PPS edge -> declare holdover
+HOLD_GOOD_S="${HOLD_GOOD_S:-10}"         # holdover < this -> GOOD; tune from metrics/ ADEV + your TDOA budget
+HOLD_INVALID_S="${HOLD_INVALID_S:-300}"  # holdover >= this -> INVALID (coordinator should drop the node)
+STATE_FILE="${STATE_FILE:-/run/xo_state}"  # the node agent / coordinator reads this
 log "start: NOMINAL=$NOMINAL AVG=$AVG DEADBAND=$DEADBAND MAXDEV=$MAXDEV gain=${HZ_PER_CNT_X100}/100 xo=$(cat $XO)"
-c=0; last=""; holdc=0; badstreak=0
+c=0; last=""; holdc=0; badstreak=0; holdstart=0; last_delta=NA; last_ppm=NA
 while :; do
     d=$(avg_delta)
+    if [ "$d" = "NOPPS" ]; then          # no PPS edges -> HOLDOVER: freeze xo, flag by elapsed time
+        now=$(date +%s)
+        [ "$holdstart" = 0 ] && { holdstart=$now; log "WARN: no PPS for >=${PPS_TIMEOUT}s -> HOLDOVER; freezing xo=$(cat $XO)"; }
+        el=$(( now - holdstart ))
+        if   [ "$el" -lt "$HOLD_GOOD_S" ];    then st=HOLDOVER_GOOD
+        elif [ "$el" -lt "$HOLD_INVALID_S" ]; then st=HOLDOVER_DEGRADED
+        else                                        st=INVALID
+        fi
+        write_state "$st" "$el"          # xo is left untouched (frozen at last good value)
+        last=correct; holdc=0
+        c=$((c + 1))
+        [ "$ITERS" -ne 0 ] && [ "$c" -ge "$ITERS" ] && { log "done ($c cycles); xo=$(cat $XO)"; break; }
+        continue
+    fi
+    # any real reading (number or BAD) means PPS edges are arriving again
+    [ "$holdstart" != 0 ] && { log "PPS recovered after $(( $(date +%s) - holdstart ))s holdover -> re-acquiring"; holdstart=0; }
     if [ "$d" = "BAD" ]; then            # this update was all outliers -> hold, maybe re-derive
         xo=$(cat $XO)
         badstreak=$((badstreak + 1))
@@ -144,6 +194,7 @@ while :; do
             [ "$NOMINAL" != "$oldn" ] && log "NOMINAL changed $oldn -> $NOMINAL (sample-rate change); re-locking"
             badstreak=0
         fi
+        write_state PPS_GLITCH 0
         last=correct; holdc=0            # force a "locked, holding" log on the next good update
         c=$((c + 1))
         [ "$ITERS" -ne 0 ] && [ "$c" -ge "$ITERS" ] && { log "done ($c cycles); xo=$(cat $XO)"; break; }
@@ -153,6 +204,7 @@ while :; do
     err=$((d - NOMINAL))                 # +ve = clock too fast
     ae=$err; [ "$ae" -lt 0 ] && ae=$((-ae))
     ppm=$(awk "BEGIN{printf \"%+.3f\", $err/($NOMINAL/1000000.0)}")
+    last_delta=$d; last_ppm=$ppm
     xo=$(cat $XO)
     if [ "$ae" -gt "$DEADBAND" ]; then
         # plant slope is NEGATIVE (raising xo lowers delta), so to null err we
@@ -163,6 +215,7 @@ while :; do
         [ "$nxo" -gt "$XO_MAX" ] && nxo=$XO_MAX
         echo "$nxo" > "$XO"
         log "err=${err}cnt (${ppm}ppm) delta=$d  xo:$xo->$nxo (${dxo}Hz)  -> correcting"
+        write_state CORRECTING 0
         settle 2
         last=correct; holdc=0
     else
@@ -171,6 +224,7 @@ while :; do
         if [ "$last" != "hold" ] || [ $((holdc % HEARTBEAT)) -eq 0 ]; then
             log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> locked, holding"
         fi
+        write_state LOCKED 0
         last=hold; holdc=$((holdc + 1))
     fi
     c=$((c + 1))

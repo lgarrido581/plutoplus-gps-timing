@@ -12,6 +12,24 @@ All notable changes to this project. Versions are git tags.
 - **`tdoa/node/bringup.sh`:** per-site bring-up — installs/links Tailscale on the Nano, verifies the
   Pluto over libiio (+ surfaces its chrony/PPS health), and smoke-tests cloud reachability.
 
+## v1.5 — Holdover & timing-quality state (GPS-loss safety)
+
+When PPS drops, the node now fails **safe and visible** instead of silently drifting.
+
+- **`xo_correct.sh` holdover state machine:** if PPS edges stop for ≥`PPS_TIMEOUT` (3 s), the loop
+  detects it (no longer blocks forever), **freezes `xo_correction`** at its last good value, and
+  publishes a timing-quality state the node agent / coordinator reads to weight or drop the node:
+  `LOCKED | CORRECTING | PPS_GLITCH | HOLDOVER_GOOD | HOLDOVER_DEGRADED | INVALID`. Holdover escalates
+  `GOOD→DEGRADED→INVALID` by elapsed time (`HOLD_GOOD_S`/`HOLD_INVALID_S`, tune from `metrics/` ADEV vs
+  your TDOA budget); on PPS return it logs recovery and re-acquires. State is written atomically to
+  `STATE_FILE` (default `/run/xo_state`):
+  `state=LOCKED holdover_s=0 xo=… nominal=… last_delta=… last_ppm=… ts=…`
+- **Validated:** holdover escalation proven in a mocked-PPS self-test; the `LOCKED` path + state-file
+  write confirmed on real hardware (auto-derive, lock, `+0.033 ppm`, state file).
+- **Same bitstream as v1.4** (rootfs/firmware only) — built via `--prebuilt-bit` (no Vivado). The
+  on-board TCXO holds *fine* timing only ~seconds; long holdover still needs an external OCXO/Rb
+  reference (ROADMAP). Reflash to get the new daemon, or just `scp` the script to test.
+
 ## v1.4.1 — TDD tooling robustness (no firmware change)
 
 Scripts/docs only — **no bitstream/firmware change, no reflash needed.**
