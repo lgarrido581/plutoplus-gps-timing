@@ -70,11 +70,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
-# Linaro ARM toolchain — Ubuntu's packaged gcc fails Buildroot's relocatability check
-RUN wget -q -O /tmp/linaro.tar.xz \
-    https://releases.linaro.org/components/toolchain/binaries/7.3-2018.05/arm-linux-gnueabihf/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf.tar.xz \
-    && tar -xf /tmp/linaro.tar.xz -C /opt/ \
-    && rm /tmp/linaro.tar.xz
+# Linaro ARM toolchain — Ubuntu's packaged gcc fails Buildroot's relocatability check.
+# NOTE: the upstream releases.linaro.org host was decommissioned (all downloads dead),
+# so we copy the identical gcc-linaro-7.3.1-2018.05 toolchain out of a public image that
+# bundles it (verified `Linaro GCC 7.3-2018.05 7.3.1 20180425`, full sysroot). If that
+# image ever goes away, substitute any source of the same tarball extracted to the same path.
+COPY --from=azureiotedge/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf:debian_8.11-1 \
+     /toolchain /opt/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf
 ENV PATH="/opt/gcc-linaro-7.3.1-2018.05-x86_64_arm-linux-gnueabihf/bin:$PATH"
 ENV CROSS_COMPILE=arm-linux-gnueabihf-
 

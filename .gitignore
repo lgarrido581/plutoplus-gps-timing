@@ -10,6 +10,9 @@ tools/
 # Logs
 *.log
 
+# Local scratch backups (e.g. CHANGELOG_backup.md) — not part of the repo
+*_backup.md
+
 # Firmware artifacts if produced outside output/
 *.frm
 *.dfu

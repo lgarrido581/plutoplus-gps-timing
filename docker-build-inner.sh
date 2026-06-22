@@ -236,8 +236,10 @@ if [ -n "$BR_CFG" ]; then
     # because mkdir -p can't traverse the dangling symlink. The toolchain
     # tarball lives in buildroot/dl/ (NOT under output/), so wiping output does
     # NOT trigger a re-download — only a re-extract/rebuild of the toolchain.
+    # NB: on a clean build buildroot/output/build doesn't exist yet, so find exits
+    # non-zero; `|| true` keeps `set -euo pipefail` from killing the script here.
     TC_STAMP=$(find buildroot/output/build -maxdepth 2 \
-        -name '.stamp_staging_installed' -path '*toolchain-external*' 2>/dev/null | head -1)
+        -name '.stamp_staging_installed' -path '*toolchain-external*' 2>/dev/null | head -1 || true)
     if [ -d buildroot/output ] && [ -z "$TC_STAMP" ]; then
         warn "  Wiping stale/partial buildroot/output (toolchain not fully installed; dl/ cache kept)..."
         rm -rf buildroot/output
@@ -546,7 +548,16 @@ regen(pdir + "/system_bd.tcl",
       "ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk\n"
       "ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn\n"
       + pps_conn + gpio_conn +
-      "ad_cpu_interconnect 0x7C460000 pps_counter_0\n")
+      "ad_cpu_interconnect 0x7C460000 pps_counter_0\n"
+      # GPS-anchor TDD: re-drive ADI axi_tdd_0/sync_in (was tied to the external
+      # tdd_ext_sync port) from pps_counter's PPS-edge pulse. Same l_clk domain, so
+      # axi_tdd's frame counter resets on each GPS PPS -> TX/RX windows align across
+      # nodes. Harmless on the software-latch build (pps_tick stays 0 -> tdd freeruns).
+      "if {[llength [get_bd_cells -quiet axi_tdd_0]]} {\n"
+      "  set _tnet [get_bd_nets -quiet -of_objects [get_bd_pins axi_tdd_0/sync_in]]\n"
+      "  if {$_tnet ne {}} {disconnect_bd_net $_tnet [get_bd_pins axi_tdd_0/sync_in]}\n"
+      "  ad_connect pps_counter_0/pps_tick axi_tdd_0/sync_in\n"
+      "}\n")
 
 # CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
 # NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
@@ -642,9 +653,22 @@ fi
 # NOTE: after changing the HDL (e.g. adding the counter), force an XSA rebuild
 #       with: rm build/system_top.xsa
 info "Starting build ($(nproc) cores) — Option B (pluto.frm; no FSBL/boot.frm)..."
+# PREBUILT_BIT: reuse a known-good PL bitstream (e.g. extracted from a prior release's
+# pluto.frm) instead of (re)synthesizing it. The stock XSA is still fetched to supply
+# the unchanged PS config / device tree (Option B reuses stock PS; the pps_counter is
+# reached by raw devmem, not a DT node), so a script-only change needs no Vivado. The
+# injected .bit must already be the final bitstream the FIT embeds (Vivado-compressed).
+if [ -n "${PREBUILT_BIT:-}" ]; then
+    [ -f "$PREBUILT_BIT" ] || die "PREBUILT_BIT=$PREBUILT_BIT not found"
+    info "  PREBUILT_BIT set -> reusing $PREBUILT_BIT ($(stat -c %s "$PREBUILT_BIT") bytes), skipping bitstream synth"
+fi
 (
     make -j"$(nproc)" build/system_top.xsa \
-    && unzip -o build/system_top.xsa system_top.bit -d build \
+    && if [ -n "${PREBUILT_BIT:-}" ]; then \
+           cp "$PREBUILT_BIT" build/system_top.bit ; \
+       else \
+           unzip -o build/system_top.xsa system_top.bit -d build ; \
+       fi \
     && touch build/system_top.bit \
     && make -j"$(nproc)" build/pluto.frm build/pluto.dfu build/uboot-env.dfu
 ) 2>&1 | tee /build/output/build.log

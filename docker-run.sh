@@ -19,11 +19,15 @@ docker volume create plutoplus-src-cache &>/dev/null
 
 # Parse args
 EXTRA_ENV=""
+PREBUILT_BIT_HOST=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --vivado) VIVADO_HOST="$2"; shift 2 ;;
         --gpio-test) EXTRA_ENV="$EXTRA_ENV -e PPS_GPIO_TEST=1"; shift ;;  # I/O voltage test build -> pluto-gpiotest.frm
         --hwlatch)   EXTRA_ENV="$EXTRA_ENV -e PPS_HWLATCH=1";   shift ;;  # hardware-latch (F20 PPS input)
+        # Reuse a known-good PL bitstream (e.g. extracted from a prior release's pluto.frm)
+        # instead of synthesizing it -> no Vivado needed for a rootfs/script-only release.
+        --prebuilt-bit) PREBUILT_BIT_HOST="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -49,6 +53,14 @@ if [ -n "$VIVADO_HOST" ]; then
     VIVADO_MOUNT="-v ${VIVADO_HOST}:${VIVADO_HOST}:ro -e VIVADO_PATH=${VIVADO_HOST} --tmpfs /sys"
 fi
 
+# Mount a prebuilt bitstream (reuse) into the container if provided.
+PREBUILT_MOUNT=""
+if [ -n "$PREBUILT_BIT_HOST" ]; then
+    [ -f "$PREBUILT_BIT_HOST" ] || { echo "--prebuilt-bit: file not found: $PREBUILT_BIT_HOST"; exit 1; }
+    echo "[*] Reusing prebuilt bitstream: $PREBUILT_BIT_HOST (no Vivado synth)"
+    PREBUILT_MOUNT="-v $(realpath "$PREBUILT_BIT_HOST"):/build/prebuilt/system_top.bit:ro -e PREBUILT_BIT=/build/prebuilt/system_top.bit"
+fi
+
 echo "[*] Starting build container (logging to build.log)..."
 docker run --rm \
     -v "$(pwd)/docker-build-inner.sh:/build/scripts/docker-build-inner.sh:ro" \
@@ -56,6 +68,7 @@ docker run --rm \
     -v "plutoplus-src-cache:/build/src" \
     -v "$(pwd)/hdl:/build/hdl-src:ro" \
     $VIVADO_MOUNT \
+    $PREBUILT_MOUNT \
     $EXTRA_ENV \
     --name plutoplus-gps-build \
     "$IMAGE" 2>&1 | tee build.log
