@@ -74,15 +74,48 @@ direct control. The BD wiring (which top-level port carries `tdd_sync`/`ENABLE`/
 build's `system_top.v` patch like `pps_ext` is today) is confirmed during implementation against the
 ADI `hdl` tree.
 
-## Open decisions for you
+## As built (v1.4)
 
-1. **FRAME_LEN policy.** Recommend constraining it to divide the samples-per-PPS (e.g. at 30.72 MSPS,
-   FRAME_LEN ∈ {... 30720000/N ...}: 10 ms = 307200, 1 ms = 30720, etc.) so frames tile the GPS second
-   with no runt. OK to enforce "divides the second," or do you want arbitrary FRAME_LEN with a runt
-   frame at the boundary?
-2. **Drive method (A vs B)** above — ADI TDD sync vs. direct ENABLE/TXNRX.
-3. **Default windows** — a sane default TX/RX split to ship (e.g. RX [0, FRAME_LEN/2), TX [FRAME_LEN/2,
-   FRAME_LEN)), or leave windows zeroed/disabled until configured.
+- **Method A** — `pps_counter` emits `pps_tick` (1-cyc pulse per PPS edge); the build rewires ADI's
+  `axi_tdd_0/sync_in` from the unused external `tdd_ext_sync` port to `pps_tick`. `axi_tdd` generates
+  the TX/RX windows (its own regs at `0x7C440000`) and re-anchors to the GPS second on each PPS.
+- **FRAME_LEN** should divide the samples-per-second (e.g. 10 ms = 307200 @ 30.72 MSPS); a sub-ppm
+  residual leaves a 1-sample runt frame, which is harmless.
+- Ships **disabled** (powers up identical to v1.3) until software configures `axi_tdd` + enables sync.
 
-Once you've picked, and Vivado finishes installing, I implement the RTL + the `system_top.v`/BD plumbing
-in the build flow, then synth via the `--vivado` path.
+## Testing
+
+- **Functional (no scope) — [`tdd_verify.sh`](tdd_verify.sh):** confirms the sample clock is locked,
+  the frame counter stays bounded and re-anchors on every PPS, and `axi_tdd` is in external-sync mode.
+  Proves *function*; software `devmem` reads are ms-jittery so they can't resolve ns.
+- **TX-vs-PPS timing (scope) — [`tdd_tx_test.sh`](tdd_tx_test.sh):** sets up a GPS-aligned, TDD-gated
+  TX burst. Scope `Ch1 = PPS`, `Ch2 = Pluto TX SMA`, trigger on PPS rising:
+  - *delay PPS→TX-rising* = fixed pipeline latency (axi_tdd + AD9361 + RF), ~constant per node →
+    the **per-node calibration term** that must be characterized so it cancels in a TDOA difference;
+  - *jitter* of that delay = sync jitter, expect ≤ 1 sample (~32.6 ns @ 30.72 MSPS);
+  - *drift over minutes* = sample-clock lock quality (≈0 with `xo_correct` locked).
+- **Two-node / sub-sample:** cross-correlate two nodes' GPS-timed captures for the inter-node
+  alignment (the real network metric); add a PPS-phase TDC (ROADMAP) to push below 1 sample.
+
+## PPS loss & holdover
+
+A brief PPS dropout does **not** break triggering:
+
+- `axi_tdd` **free-runs** between sync pulses — `pps_tick` *re-aligns* its frame counter, it does not
+  gate it. Same for `pps_counter`'s own frame counter (`frame_wrap` keeps it running; the PPS edge only
+  *reloads* it). So frames/bursts keep coming during a gap.
+- The only effect is loss of re-anchoring: frame phase drifts vs absolute GPS by
+  `residual_ppm × gap` (~30 ns per second of gap at the ~0.03 ppm hold). The next PPS snaps it back.
+- The sample clock holds its last `xo_correction` (TCXO runs at the last-disciplined frequency);
+  `xo_correct.sh` just waits for PPS to resume and (v1.4) won't rail on a glitchy/returning PPS.
+
+Caveats / when a backup matters:
+
+- **First PPS arms it.** `axi_tdd` in external-sync mode waits for the first sync edge to *start*
+  framing — at cold start with no GPS it won't begin. Fallback: use `axi_tdd`'s internal/soft sync
+  (`CONTROL.sync_int`/`sync_soft`) to free-run un-aligned until GPS appears.
+- **Long outages** (minutes+): TCXO temperature drift degrades alignment beyond ±1 sample → use the
+  ROADMAP holdover items: detect PPS loss → freeze `xo` + flag timestamps `degraded`; and the hardware
+  path (external OCXO/Rb GPSDO) for true holdover.
+- Quick check: start TDD, disable PPS, watch `tdd_verify.sh` — `FRAME_SEQ` keeps advancing (free-run)
+  until PPS returns and re-aligns.

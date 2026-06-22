@@ -12,6 +12,22 @@ All notable changes to this project. Versions are git tags.
 - **`tdoa/node/bringup.sh`:** per-site bring-up — installs/links Tailscale on the Nano, verifies the
   Pluto over libiio (+ surfaces its chrony/PPS health), and smoke-tests cloud reachability.
 
+## v1.4.1 — TDD tooling robustness (no firmware change)
+
+Scripts/docs only — **no bitstream/firmware change, no reflash needed.**
+
+- **`tdd_verify.sh`** no longer infers the rate from the *sticky* `PPS_DELTA`. It reads the
+  authoritative AD936x sample rate from **sysfs** (`in_voltage_sampling_frequency`, works without PPS),
+  judges PPS liveness by **`PPS_SEQ` advancing**, and cross-checks `l_clk` vs sysfs (reports 1×/2×).
+  When PPS isn't live it exits with a clear **`NO LIVE PPS`** verdict + the F20 check, instead of a
+  misleading derived rate (which previously made a no-PPS board print `l_clk≈61.44 MHz` from a stale latch).
+- **`tdd_tx_test.sh`** (new): sets up a GPS-aligned, TDD-gated TX burst for measuring **TX-vs-PPS timing
+  on a scope** (delay = per-node fixed latency, jitter ≤1 sample, drift = lock quality). Same
+  sysfs-rate + live-PPS gating.
+- **Docs:** `TDD_PPS_DESIGN.md` gains Testing + PPS-loss/holdover sections; `ROADMAP.md`/`NETWORK.md`
+  make explicit that **sample rate is tracked at the coordinator** (nodes read+report it; fusion uses
+  each node's reported rate, never a global constant — required since nodes may run different rates).
+
 ## v1.4 — GPS-aligned TDD + disciplined-clock robustness
 
 **Headline:** the AD936x **TDD frame is now phase-locked to GPS time**. Combined with the existing

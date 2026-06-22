@@ -31,9 +31,14 @@ Priorities are ordered roughly by impact-for-effort.
   - **Cross-check** GPS-derived time against peer nodes (NTP/common-view); a node
     that disagrees with the consensus gets flagged.
 
-- **Per-node health/quality telemetry.** Export `pps_present`, sat count, current
-  `xo_correction` offset (ppm), recent ADEV, and die temperature so the
-  coordinator knows each node's timing quality and can weight measurements. (This
+- **Per-node health/quality telemetry.** Export `pps_present`, **live `PPS_SEQ` rate**
+  (not the sticky `PPS_DELTA`), the **AD936x sample rate + `l_clk` multiple (1×/2×)**,
+  current `xo_correction` offset (ppm), recent ADEV, and die temperature so the
+  coordinator knows each node's timing quality and can weight measurements.
+  **Sample rate is a system-of-systems fact, not a per-script assumption:** node tools
+  read it from sysfs (`in_voltage_sampling_frequency`) and report it; the coordinator
+  holds the authoritative per-node rate (nodes may legitimately differ, e.g. a 2×
+  `l_clk` board), and fusion uses it rather than assuming a network-wide constant. (This
   is *reporting*, distinct from C2.)
 
 ## Node robustness

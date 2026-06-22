@@ -29,6 +29,7 @@ T_VERSION=0x7C440000; T_IDENT=0x7C44000C; T_CONTROL=0x7C440040
 T_CHEN=0x7C440044; T_FRAMELEN=0x7C440054; T_STATUS=0x7C440060
 T_CH0_ON=0x7C440080; T_CH0_OFF=0x7C440084
 
+SRATE_F=/sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency  # authoritative AD936x rate
 SECS="${SECS:-8}"
 FRAME_MS="${FRAME_MS:-10}"        # frame length in ms (must divide 1000 for a clean tile)
 
@@ -38,17 +39,49 @@ d()  { printf '%d' "$1"; }        # hex->dec
 
 echo "=== tdd_verify: PPS-aligned TDD functional check ==="
 
-# sample rate from the locked PPS_DELTA (counts/sec == l_clk Hz)
-FS=$(( $(d "$(rd $P_PPSDELTA)") ))
-[ "$FS" -gt 1000000 ] || { echo "PPS_DELTA=$FS implausible - is GPS/PPS locked and xo disciplined? aborting"; exit 1; }
-FRAME_LEN=$(( FS * FRAME_MS / 1000 ))
-EXP_FRAMES=$(( FS / FRAME_LEN ))
-echo "  l_clk (from PPS_DELTA) = $FS Hz;  frame = ${FRAME_MS}ms = $FRAME_LEN samples;  expect ~$EXP_FRAMES frames/sec"
-[ $(( FS - EXP_FRAMES * FRAME_LEN )) -eq 0 ] || echo "  NOTE: ${FRAME_MS}ms does not evenly divide the second at this fs (a runt frame will appear)."
-
 # pps_counter present?
 [ "$(rd $P_ID)" = "0x50505343" ] || { echo "pps_counter ID != PPSC; wrong bitstream. aborting"; exit 1; }
-[ "$(rd $P_STATUS)" = "0x00000001" ] || echo "  WARN: STATUS.pps_present=0 (no PPS latched yet)"
+
+# --- authoritative sample rate: read the AD936x config from sysfs (works WITHOUT PPS). This is the
+#     rate the system-of-systems should track per node; we don't infer it from the sticky PPS_DELTA. ---
+SR=$(cat "$SRATE_F" 2>/dev/null); SR=$(( ${SR:-0} + 0 ))
+if [ "$SR" -gt 0 ]; then
+    echo "  AD936x RX sample rate (sysfs) = $SR Hz   <- track THIS per node at the coordinator"
+else
+    echo "  WARN: cannot read sysfs sample rate ($SRATE_F)"
+fi
+
+# --- is PPS actually LIVE? PPS_SEQ must advance. Do NOT trust pps_present/PPS_DELTA (both sticky). ---
+q0=$(( $(d "$(rd $P_PPSSEQ)") )); sleep 3; q1=$(( $(d "$(rd $P_PPSSEQ)") )); dq=$(( q1 - q0 ))
+echo "  live PPS check: PPS_SEQ advanced $dq in 3s (pps_present=$(rd $P_STATUS), PPS_DELTA=$(rd $P_PPSDELTA))"
+if [ "$dq" -lt 1 ]; then
+    echo
+    echo "=== verdict: NO LIVE PPS ==="
+    echo "  PPS_SEQ is not advancing -> the hardware PPS latch (F20) sees no edges; the TDD frame cannot anchor."
+    echo "  pps_present/PPS_DELTA above may be STALE (latched from a prior session) - do not trust them as live."
+    echo "  Fix: GPS has a fix; PPS wired to F20 (level-shifted <=1.8V) and pulsing:"
+    echo "    for i in 1 2 3 4 5; do devmem $P_PPSSEQ 32; sleep 1; done   # must increment once/sec"
+    echo "  (axi_tdd present: VERSION=$(rd $T_VERSION) IDENT=$(rd $T_IDENT) CONTROL=$(rd $T_CONTROL))"
+    exit 2
+fi
+
+# --- PPS live: l_clk = measured counts/sec; cross-check against the sysfs sample rate (1x vs 2x). ---
+FS=$(( $(d "$(rd $P_PPSDELTA)") ))
+if [ "$SR" -gt 0 ]; then
+    Mx100=$(( FS * 100 / SR ))
+    case "$Mx100" in
+        9[5-9]|100|10[1-5]) ratio="~1x sample rate" ;;
+        19[0-9]|200|20[1-9]) ratio="~2x sample rate (data-clock doubled on this node - track at coordinator)" ;;
+        *) ratio="${Mx100}/100 x sample rate (UNEXPECTED - verify clocking)" ;;
+    esac
+    echo "  l_clk (measured from PPS) = $FS Hz = $ratio"
+else
+    echo "  l_clk (measured from PPS) = $FS Hz"
+fi
+FRAME_LEN=$(( FS * FRAME_MS / 1000 ))
+EXP_FRAMES=$(( FS / FRAME_LEN ))
+echo "  frame = ${FRAME_MS}ms = $FRAME_LEN samples; expect ~$EXP_FRAMES frames/sec"
+[ $(( FS - EXP_FRAMES * FRAME_LEN )) -eq 0 ] || echo "  NOTE: ${FRAME_MS}ms doesn't evenly divide the second at this rate (a runt frame appears)."
 
 # ---- A) drive pps_counter's own frame counter (proxy for the GPS-aligned frame) ----
 wr $P_TDDCTRL 0x0                       # disable while configuring
@@ -91,7 +124,13 @@ echo
 echo "=== verdict ==="
 echo "  sample clock: l_clk=$FS Hz (xo_correct disciplines this; within ~1 count of nominal = locked)."
 BOUND=$(( EXP_FRAMES + EXP_FRAMES/10 + 3 ))
-if [ "$secs" -lt 2 ]; then
+if [ "$secs" -lt 2 ] && [ "$maxseq" -gt "$BOUND" ]; then
+    echo "  NO LIVE PPS: PPS_SEQ did not advance, yet FRAME_SEQ climbed to $maxseq (free-running)."
+    echo "        -> the hardware PPS latch (F20) is not seeing edges, so the TDD frame can't anchor."
+    echo "        Check: GPS has a fix; PPS reaches F20 (level-shifted to <=1.8V) AND is pulsing:"
+    echo "          for i in 1 2 3 4 5; do devmem 0x7C460018 32; sleep 1; done   # must increment 1/sec"
+    echo "        (STATUS.pps_present and PPS_DELTA can be STALE values latched from a prior session.)"
+elif [ "$secs" -lt 2 ]; then
     echo "  inconclusive: PPS_SEQ advanced <2 in ${SECS}s (is PPS locked? increase SECS)."
 elif [ "$maxseq" -le "$BOUND" ]; then
     echo "  PASS: FRAME_SEQ stayed bounded (max=$maxseq ~ $EXP_FRAMES) and reset on each PPS"

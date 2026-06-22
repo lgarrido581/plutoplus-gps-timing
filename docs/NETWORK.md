@@ -49,8 +49,11 @@ node reaches the coordinator and vice-versa regardless of each friend's home net
 1. **Tailscale + node bring-up** ✅ scaffolded — `tdoa/node/bringup.sh`. Installs/links Tailscale on
    the Nano, verifies the Pluto over libiio, smoke-tests cloud reachability. Run it per site.
 2. **Node↔cloud protocol** — `trigger → GPS-second capture → hybrid edge-reduce → push(report)`.
-   Report = node id, GPS-second + sample index of detection(s), correlation peak(s) / reduced IQ,
-   node clock-health (chrony tracking + `pps_counter` lock state). Coordinator stub behind `push()`.
+   Report = node id, **AD936x sample rate + `l_clk` multiple** (read from sysfs, not assumed),
+   GPS-second + sample index of detection(s), correlation peak(s) / reduced IQ, node clock-health
+   (chrony tracking + `pps_counter` lock state + live `PPS_SEQ` rate). The coordinator holds the
+   authoritative per-node sample rate (nodes may differ); fusion converts sample indices to time using
+   each node's reported rate, never a global constant. Coordinator stub behind `push()`.
 3. **Cloud fusion** — collect ≥3 node reports for the same GPS-second, solve TDOA → multilateration.
 
 ## Bring-up
