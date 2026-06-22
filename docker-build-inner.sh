@@ -55,7 +55,9 @@ if [ -f "$VIVADO_SETTINGS" ]; then
     info "Vivado $VIVADO_VERSION found at $VIVADO_PATH — full build (HDL bitstream + boot.frm)"
 else
     # Fall back to any installed Vivado under VIVADO_PATH.
-    ALT=$(ls "$VIVADO_PATH"/Vivado/*/settings64.sh 2>/dev/null | head -1)
+    # `|| true`: with no Vivado the glob doesn't match, ls exits non-zero, and pipefail
+    # + set -e would kill the script silently here (the no-Vivado / --prebuilt-bit path).
+    ALT=$(ls "$VIVADO_PATH"/Vivado/*/settings64.sh 2>/dev/null | head -1 || true)
     if [ -n "$ALT" ]; then
         source "$ALT" &>/dev/null
         VIVADO_VERSION=$(basename "$(dirname "$ALT")")
@@ -443,6 +445,14 @@ if [ -d buildroot/output/build ]; then
         touch buildroot/output/.fakeroot_rebuilt_2204
         info "  forced host-fakeroot rebuild (22.04 glibc)"
     fi
+    # Buildroot overlays are NOT dependency-tracked: editing an overlay file (e.g.
+    # xo_correct.sh / an init script) does not invalidate the cached rootfs image, so
+    # on an incremental build the change silently never ships. Remove the rootfs images
+    # + the packaged frm so they regenerate -- target-finalize re-applies all overlays
+    # when the image is rebuilt. (Cheap relative to the chrony/gpsd rebuild above.)
+    rm -f buildroot/output/images/rootfs.cpio* buildroot/output/images/rootfs.tar 2>/dev/null || true
+    rm -f build/pluto.frm build/pluto.itb build/pluto.dfu build/rootfs.cpio.gz 2>/dev/null || true
+    info "  forced rootfs image + pluto.frm rebuild (overlay edits aren't dep-tracked)"
 fi
 
 # ---- Fix VERSION and LATEST_TAG (both use git describe; fail on shallow clone) ----

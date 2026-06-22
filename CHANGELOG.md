@@ -26,9 +26,15 @@ When PPS drops, the node now fails **safe and visible** instead of silently drif
   `state=LOCKED holdover_s=0 xo=… nominal=… last_delta=… last_ppm=… ts=…`
 - **Validated:** holdover escalation proven in a mocked-PPS self-test; the `LOCKED` path + state-file
   write confirmed on real hardware (auto-derive, lock, `+0.033 ppm`, state file).
-- **Same bitstream as v1.4** (rootfs/firmware only) — built via `--prebuilt-bit` (no Vivado). The
-  on-board TCXO holds *fine* timing only ~seconds; long holdover still needs an external OCXO/Rb
-  reference (ROADMAP). Reflash to get the new daemon, or just `scp` the script to test.
+- **Same bitstream as v1.4** (rootfs/firmware only) — built via `--prebuilt-bit` (no Vivado); the
+  packaged `fpga` node is byte-identical (`sha256 b9d50963…`). The on-board TCXO holds *fine* timing
+  only ~seconds; long holdover still needs an external OCXO/Rb reference (ROADMAP). Reflash to get the
+  new daemon, or just `scp` the script to test.
+- **Build fixes for the `--prebuilt-bit` / no-Vivado path** (`docker-build-inner.sh`): (1) a silent
+  `set -euo pipefail` crash on `ls "$VIVADO_PATH"/Vivado/*/settings64.sh | head` when no Vivado is
+  present (`|| true`); (2) buildroot overlays aren't dependency-tracked, so an edited overlay (e.g.
+  `xo_correct.sh`) didn't invalidate the cached rootfs image and silently never shipped — now the
+  rootfs image + `pluto.frm` are force-rebuilt so overlay edits take effect.
 
 ## v1.4.1 — TDD tooling robustness (no firmware change)
 
