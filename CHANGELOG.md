@@ -12,6 +12,33 @@ All notable changes to this project. Versions are git tags.
 - **`tdoa/node/bringup.sh`:** per-site bring-up — installs/links Tailscale on the Nano, verifies the
   Pluto over libiio (+ surfaces its chrony/PPS health), and smoke-tests cloud reachability.
 
+## v1.4 — GPS-aligned TDD + disciplined-clock robustness
+
+**Headline:** the AD936x **TDD frame is now phase-locked to GPS time**. Combined with the existing
+sample-clock discipline, every node's TX/RX windows start on the same GPS-second boundary — the
+foundation for coordinated, multi-node capture/transmit.
+
+- **PPS-aligned TDD** (`hdl/pps_counter/`): `pps_counter` gained a frame counter in the `l_clk`
+  domain plus a **`pps_tick`** output (1-cycle pulse on each PPS edge). `docker-build-inner.sh`
+  rewires ADI's `axi_tdd_0/sync_in` (formerly the unused external `tdd_ext_sync` port) to `pps_tick`,
+  so `axi_tdd`'s frame counter re-anchors to the GPS second every PPS — same `l_clk` domain, no CDC.
+  New AXI registers `0x1C–0x38` (`TDD_CTRL`, `FRAME_LEN`, RX/TX windows, `FRAME_POS`, `FRAME_SEQ`);
+  disabled by default (powers up identical to v1.3). Design: [docs](hdl/pps_counter/TDD_PPS_DESIGN.md).
+- **`tdd_verify.sh`** — on-device functional proof: confirms the sample clock is locked, the frame
+  counter stays bounded and re-anchors on every PPS, and `axi_tdd` is in external-sync mode consuming
+  `pps_tick`. **Validated on hardware** (`PASS`, `FRAME_SEQ` 0..~100, `axi_tdd CONTROL=0x9`). Software
+  reads are ms-jittery so this proves *function*; ns/sample precision needs a scope or two-node
+  cross-correlation (precision floor ±1 sample ≈ 32.6 ns until a PPS-phase TDC is added).
+- **`xo_correct.sh` robustness** — (1) **auto-derives `NOMINAL`** from the live AD936x sample rate ×
+  the measured `l_clk` multiple, so it locks on any clocking (e.g. a board running `l_clk` at 2×);
+  (2) **rejects outlier `PPS_DELTA`** (missed/spurious PPS edges) and holds the last good `xo` instead
+  of railing the knob; (3) **re-derives on a sustained rate change**. Plant gain + outlier band scale
+  with the derived rate.
+- **Build resiliency:** the dead `releases.linaro.org` toolchain URL is replaced with a `COPY --from`
+  of the identical `gcc-linaro-7.3.1-2018.05` toolchain (unblocks all builds); a clean-build
+  `set -euo pipefail` crash (`find … | head` on a missing dir) is fixed; and **`--prebuilt-bit`**
+  lets a script/rootfs-only release reuse a known-good bitstream with no Vivado.
+
 ## v1.3 — FPGA GPS-timing counter
 - **Vivado-in-Docker build path:** `docker-run.sh --vivado <XilinxPath>` rebuilds the FPGA bitstream
   in-container and repackages it into `pluto.frm`, reusing the stock `boot.frm` (PL-only "Option B"

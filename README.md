@@ -16,8 +16,8 @@ no local Xilinx install is needed for the base firmware.
 **Docs:** [Wiring](docs/WIRING.md) · [Verify/NTP serving](docs/NTP.md) · [Gotchas](docs/GOTCHAS.md) ·
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
 [Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
-[Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [Roadmap](docs/ROADMAP.md) ·
-[Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
+[Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
+[Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -31,6 +31,7 @@ no local Xilinx install is needed for the base firmware.
 | **LAN NTP server** | serves GPS time to RFC1918 + IPv6 link‑local once locked — see [NTP](docs/NTP.md) |
 | **Diagnostics** | `ppstest`, `gpsmon`, `cgps`, `gpspipe` |
 | **GPS‑disciplined sample clock** *(`--hwlatch`)* | FPGA `pps_counter` + `xo_correct.sh` lock the AD936x sample clock to GPS for `xo_correction`/TDOA — see [FPGA counter](hdl/pps_counter/README.md) |
+| **GPS‑aligned TDD** *(`--hwlatch`, v1.4)* | `pps_counter` emits a PPS‑edge `pps_tick` that re‑anchors ADI's `axi_tdd` frame each GPS second → TX/RX windows phase‑locked to GPS across nodes. Verify with `tdd_verify.sh`; design in [PPS‑aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) |
 
 **Two build variants:** the **base** firmware (`bash docker-run.sh`, no Vivado) gives everything above
 except the FPGA counter; the **`--hwlatch`** firmware adds the sample‑clock counter + auto‑discipline
@@ -140,6 +141,17 @@ devmem 0x7C460000 32        # -> 0x50505343   ("PPSC" = counter present)
 devmem 0x7C460008 32        # -> 0x00000001   (hardware PPS latch capturing; after GPS lock)
 cat /var/log/xocorrect.log  # -> "locked, holding ... delta=30720000" (offset ~0 ppm)
 ```
+
+**5. GPS-aligned TDD** (`--hwlatch` build, v1.4) — copy [`tdd_verify.sh`](hdl/pps_counter/tdd_verify.sh)
+to the Pluto and run it:
+```sh
+scp hdl/pps_counter/tdd_verify.sh root@pluto.local:/tmp/   # password: analog
+ssh root@pluto.local 'sh /tmp/tdd_verify.sh'
+# -> PASS: FRAME_SEQ bounded 0..~100 and resets each PPS; axi_tdd CONTROL=0x9 (ext-sync)
+```
+It proves *function* (clock locked, frame re-anchors on PPS, `axi_tdd` consuming `pps_tick`). Software
+reads are ms-jittery, so for nanosecond/sample precision scope a TDD channel vs PPS or two-node
+cross-correlate — see [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md).
 
 **No fix?** Almost always antenna/reception (SNR ≈ 0 = antenna not really receiving) — see
 [Gotchas](docs/GOTCHAS.md). Serving NTP to other machines is covered in [NTP](docs/NTP.md).

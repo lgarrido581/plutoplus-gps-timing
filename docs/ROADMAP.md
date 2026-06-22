@@ -23,8 +23,10 @@ Priorities are ordered roughly by impact-for-effort.
 
 - **GPS integrity (anti-spoof / anti-jam).** A localization net is only as honest
   as its time source.
-  - **Bound-check `PPS_DELTA`** against an expected window and **reject outliers**
-    before applying a correction (a bad second shouldn't yank the clock).
+  - ✅ **Bound-check `PPS_DELTA` / reject outliers** *(done)* — `xo_correct.sh` now
+    rejects deltas beyond `MAXPPM` of the (auto-derived) nominal and holds the last
+    good `xo` instead of railing; re-derives nominal on a sustained rate change.
+    *Pending hardware validation.*
   - Monitor **satellite count / fix quality / HDOP**; flag low-confidence epochs.
   - **Cross-check** GPS-derived time against peer nodes (NTP/common-view); a node
     that disagrees with the consensus gets flagged.
@@ -66,9 +68,10 @@ Priorities are ordered roughly by impact-for-effort.
 
 ## GPS-scheduled TX/RX & coordination
 
-- **PPS-synced TDD** — feed the F20 PPS into `axi_tdd_0/sync_in` so the (already
-  DMA-gating) TDD frame is GPS-aligned → deterministic, repeating, node-coordinated
-  RX capture and DAC waveform playback. ~1 BD wire. *(low effort)*
+- 🔧 **PPS-synced TDD** *(in flight)* — `pps_counter` gained a PPS-reset frame counter
+  + a `pps_tick` output now driving `axi_tdd_0/sync_in`, so the (already DMA-gating)
+  TDD frame is GPS-aligned. RTL + BD rewire done; feature build running. *Remaining:*
+  on-device config/verify tooling + a two-node alignment test.
 - **Compare-trigger IP** — extend `pps_counter` with a `TARGET`/`arm` compare that
   fires at an absolute GPS sample-time → one-shot scheduled events (two-way
   ranging, "TX at 12:00:00.000 GPS"). *(small new HDL)*
@@ -87,6 +90,29 @@ Design + register sketch + the full beamforming requirements: **[SCHEDULING.md](
   satellite timing holdover.
 - **Proper F20 level shifter** (replaces the test resistor divider) → deterministic,
   low-jitter PPS into the hardware latch.
+
+## Repo health & dev process (the missing dimension)
+
+This roadmap covered features/hardware but not the repo's own robustness — and two
+self-inflicted blockers this cycle (a dead Linaro URL, a clean-build `pipefail` crash)
+show the gap.
+
+- **Commit the working tree.** Big batch of verified-but-uncommitted work (Dockerfile
+  toolchain fix, `xo_correct` rewrite, TDD RTL + BD wiring, `--prebuilt-bit`, build
+  bugfix, docs). Branch, commit in logical chunks, tag a release.
+- **CI / regression guard** *(none today)*. Minimum on PR: `bash -n`/shellcheck the
+  `.sh` files + `xvlog` lint `pps_counter.v`. Stretch: an out-of-context `synth_design`
+  smoke test. Either would have caught the `pipefail` bug.
+- **Toolchain source is a 3rd-party image.** Dockerfile now pulls gcc-linaro from
+  `azureiotedge/...`. Pin it by digest and document a fallback, or vendor the tarball
+  (release asset / git-lfs) so a single deleted image can't break all builds.
+- **Document the build environment** — WSL2 Vivado + Docker WSL integration + the
+  `--prebuilt-bit` (no-Vivado) path. Currently only in session memory.
+- **On-device tooling for the new TDD/`pps_counter` registers** — extend
+  `read_counter.py` / add a `tdd_config.sh` (set `FRAME_LEN`/windows, configure
+  `axi_tdd` at `0x7C440000`, read back `FRAME_POS`/`FRAME_SEQ`).
+- **Pluto zeroconf address rotates** (`169.254.x` moved mid-session) — static
+  link-local or consistent `pluto.local` use so node tooling stops chasing it.
 
 ---
 
