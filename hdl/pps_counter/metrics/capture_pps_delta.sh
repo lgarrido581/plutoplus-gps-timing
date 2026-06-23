@@ -18,6 +18,21 @@ SEQ=0x7C460018      # PPS_SEQ   - rising-edge counter
 DELTA=0x7C460014    # PPS_DELTA - counts since previous edge
 
 N="${1:-600}"       # number of PPS edges to capture (default 600 ~= 10 min)
+SRATE_F=/sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency
+if sleep 0.2 2>/dev/null; then NAP="sleep 0.2"; else NAP="sleep 1"; fi
+
+# Header: record the rate so analyze.py uses it (1x in 1r1t, 2x in 2r2t) instead of
+# assuming 30.72M. NOMINAL = sysfs sample_rate x the measured l_clk multiple.
+sr=$(cat "$SRATE_F" 2>/dev/null); sr=$((sr)); [ "$sr" -gt 0 ] || sr=30720000
+i=0; dps=-1; vals=""
+while [ "$i" -lt 5 ]; do
+    s=$(devmem $SEQ 32); s=$((s))
+    if [ "$s" != "$dps" ]; then dps=$s; d=$(devmem $DELTA 32); vals="$vals $((d))"; i=$((i + 1)); else $NAP; fi
+done
+med=$(printf '%s\n' $vals | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+rx=$(( med * 1000 / sr )); m=1000; bd=2000000000
+for c in 500 1000 2000 4000; do dd=$((rx - c)); [ "$dd" -lt 0 ] && dd=$((-dd)); [ "$dd" -lt "$bd" ] && { bd=$dd; m=$c; }; done
+echo "# nominal=$(( sr * m / 1000 )) sample_rate=$sr ts=$(date +%s)"
 
 prev=-1
 n=0

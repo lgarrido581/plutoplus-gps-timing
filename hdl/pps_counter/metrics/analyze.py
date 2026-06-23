@@ -16,13 +16,31 @@ Run with the host venv that has numpy+matplotlib, e.g.:
   ~/.venv-pluto/Scripts/python.exe analyze.py data/baseline_precorrection.csv \
       --label "pre-correction (baseline)" --prefix baseline
 """
-import argparse, os, sys
+import argparse, os, re, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-NOMINAL_HZ = 30_720_000  # AD936x sample clock at the default 30.72 MHz rate
+BASE_HZ = 30_720_000  # AD936x default rate; l_clk is this x{0.5,1,2,4} depending on mode
+
+
+def detect_nominal(delta_median):
+    """Snap the captured rate to the 30.72M-family nominal (1x in 1r1t, 2x in 2r2t)."""
+    mult = min((0.5, 1, 2, 4), key=lambda k: abs(delta_median / BASE_HZ - k))
+    return BASE_HZ * mult
+
+
+def read_header_nominal(path):
+    """Read '# nominal=<N>' emitted by the capture scripts, if present."""
+    with open(path) as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            m = re.search(r"nominal=(\d+)", line)
+            if m:
+                return float(m.group(1))
+    return None
 
 
 def overlapping_adev(y, tau0=1.0):
@@ -46,7 +64,8 @@ def overlapping_adev(y, tau0=1.0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
-    ap.add_argument("--nominal", type=float, default=NOMINAL_HZ)
+    ap.add_argument("--nominal", type=float, default=None,
+                    help="counts/sec (l_clk). Default: read '# nominal=' header, else auto-detect.")
     ap.add_argument("--label", default="pre-correction (baseline)")
     ap.add_argument("--prefix", default="baseline")
     ap.add_argument("--figdir", default=None)
@@ -75,7 +94,16 @@ def main():
     gaps = int(np.sum(np.diff(np.sort(np.unique(seq))) != 1))
     t = np.arange(len(delta))  # one sample per captured edge
 
-    nom = args.nominal
+    # nominal rate: CLI override > capture header > auto-detect from the data
+    if args.nominal is not None:
+        nom, nsrc = args.nominal, "CLI"
+    else:
+        hdr = read_header_nominal(args.csv)
+        if hdr is not None:
+            nom, nsrc = hdr, "header"
+        else:
+            nom, nsrc = detect_nominal(np.median(delta)), "auto-detected from data"
+    print(f"nominal: {nom:,.0f} Hz ({nsrc}; l_clk = {nom/BASE_HZ:g}x the 30.72M base rate)")
     y = (delta - nom) / nom            # fractional frequency offset
     ppm = y * 1e6
     ns_per_count = 1e9 / nom

@@ -14,14 +14,30 @@ A "re-tune transient" (a single GPS second caught during a PLL relock when the
 loop nudged xo_correction) is excluded from steady-state jitter stats and
 despiked for the Allan deviation; it is kept (and visible) in the time series.
 """
-import argparse, os
+import argparse, os, re
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-NOMINAL = 30_720_000
-TRANSIENT = 50  # |delta-NOMINAL| > this (counts, ~1.6 ppm) = re-tune relock sample
+BASE_HZ = 30_720_000   # AD936x default rate; l_clk is this x{0.5,1,2,4} by mode
+TRANSIENT_PPM = 1.6    # |delta-median| beyond this ppm = a re-tune relock sample
+
+
+def detect_nominal(delta_median):
+    mult = min((0.5, 1, 2, 4), key=lambda k: abs(delta_median / BASE_HZ - k))
+    return BASE_HZ * mult
+
+
+def read_header_nominal(path):
+    with open(path) as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            m = re.search(r"nominal=(\d+)", line)
+            if m:
+                return float(m.group(1))
+    return None
 
 
 def load(path):
@@ -45,26 +61,27 @@ def adev(y, tau0=1.0):
     return np.array(taus), np.array(devs)
 
 
-def stats(delta):
-    err = delta - NOMINAL
+def stats(delta, nom):
+    err = delta - nom
+    transient = max(int(round(nom * TRANSIENT_PPM * 1e-6)), 4)  # counts; scales with rate
     # a transient is a sample far from THIS run's own median (a PLL relock during
     # an xo_correction write), not from nominal -- the baseline's offset is real.
     med = np.median(delta)
-    inlier = np.abs(delta - med) <= TRANSIENT
+    inlier = np.abs(delta - med) <= transient
     n_tr = int(np.sum(~inlier))
     ei = err[inlier]
     # despiked copy for ADEV / drift slope: replace transients with inlier median
     ed = err.copy(); ed[~inlier] = np.median(ei)
-    y = ed / NOMINAL
+    y = ed / nom
     taus, ad = adev(y)
     return dict(
-        n=len(delta), n_tr=n_tr,
-        mean_ppm=ei.mean() / NOMINAL * 1e6,
-        std_ppm=ei.std(ddof=1) / NOMINAL * 1e6,
+        n=len(delta), n_tr=n_tr, nom=nom, transient=transient,
+        mean_ppm=ei.mean() / nom * 1e6,
+        std_ppm=ei.std(ddof=1) / nom * 1e6,
         p2p_cnt=int(ei.max() - ei.min()),
-        p2p_ns=(ei.max() - ei.min()) * 1e9 / NOMINAL,
-        drift_us_s=ed.mean() / NOMINAL * 1e6,    # despiked mean = sustained slope
-        cum_us=np.cumsum((delta - NOMINAL) / NOMINAL) * 1e6,   # full (honest)
+        p2p_ns=(ei.max() - ei.min()) * 1e9 / nom,
+        drift_us_s=ed.mean() / nom * 1e6,    # despiked mean = sustained slope
+        cum_us=np.cumsum((delta - nom) / nom) * 1e6,   # full (honest)
         taus=taus, adev=ad, err=err,
     )
 
@@ -73,10 +90,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("before"); ap.add_argument("after")
     ap.add_argument("--figdir", default="figures")
+    ap.add_argument("--nominal", type=float, default=None,
+                    help="counts/sec (l_clk). Default: '# nominal=' header, else auto-detect per file.")
     a = ap.parse_args()
     os.makedirs(a.figdir, exist_ok=True)
 
-    B = stats(load(a.before)); A = stats(load(a.after))
+    db, da = load(a.before), load(a.after)
+    nb = a.nominal or read_header_nominal(a.before) or detect_nominal(np.median(db))
+    na = a.nominal or read_header_nominal(a.after) or detect_nominal(np.median(da))
+    print(f"nominal: before={nb:,.0f} Hz  after={na:,.0f} Hz"
+          + ("" if nb == na else "  WARNING: rates differ (different mode?) -- each normalized to its own"))
+    B = stats(db, nb); A = stats(da, na)
     tb = np.arange(B["n"]); ta = np.arange(A["n"])
 
     def row(name, b, aa):
@@ -100,8 +124,8 @@ def main():
         plt.tight_layout(); plt.savefig(p, dpi=130); plt.close(); print("wrote", p)
 
     plt.figure(figsize=(8.4, 3.3))
-    plt.plot(tb, B["err"] / NOMINAL * 1e6, lw=.8, label="pre-correction")
-    plt.plot(ta, A["err"] / NOMINAL * 1e6, lw=.8, label="post-correction")
+    plt.plot(tb, B["err"] / B["nom"] * 1e6, lw=.8, label="pre-correction")
+    plt.plot(ta, A["err"] / A["nom"] * 1e6, lw=.8, label="post-correction")
     plt.axhline(0, color="k", lw=.5)
     plt.xlabel("time (s)"); plt.ylabel("freq offset (ppm)")
     plt.title("AD936x sample-clock frequency offset vs GPS"); plt.legend(); plt.grid(alpha=.3)
@@ -124,15 +148,15 @@ def main():
 
     plt.figure(figsize=(7.0, 3.6))
     inl = []
-    for d in (B["err"], A["err"]):
-        inl.append(d[np.abs(d - np.median(d)) <= TRANSIENT])
+    for d, st in ((B["err"], B), (A["err"], A)):
+        inl.append(d[np.abs(d - np.median(d)) <= st["transient"]])
     lo = int(min(inl[0].min(), inl[1].min())) - 1
     hi = int(max(inl[0].max(), inl[1].max())) + 1
     bins = np.arange(lo - .5, hi + 1.5, 1)
     plt.hist(inl[0], bins=bins, alpha=.6, label="pre-correction", color="C0", edgecolor="k", lw=.3)
     plt.hist(inl[1], bins=bins, alpha=.6, label="post-correction", color="C1", edgecolor="k", lw=.3)
     plt.axvline(0, color="k", lw=.6, ls="--")
-    plt.xlabel("frequency error (counts vs nominal,  1 count = 0.033 ppm = 33 ns)")
+    plt.xlabel(f"frequency error (counts vs nominal,  1 count = {1e6/A['nom']:.3f} ppm = {1e9/A['nom']:.0f} ns)")
     plt.ylabel("count")
     plt.title("Steady-state per-second distribution (re-tune transients excluded)")
     plt.legend(); plt.grid(alpha=.3); save("hist")

@@ -34,6 +34,12 @@ When PPS drops, the node now fails **safe and visible** instead of silently drif
   at cold boot (GPS not locked yet) is 0 → it "skipped" and never retried, so `xo_correct` didn't
   autostart until manually kicked. Now the background waiter **polls for both `pps_present` and a chrony
   PPS lock**, then disciplines — robust across a cold boot.
+- **Metrics pipeline is now rate-independent** (`hdl/pps_counter/metrics/`): the capture scripts
+  auto-derive `NOMINAL` (sysfs `sample_rate` × measured `l_clk` multiple) and emit a `# nominal=`
+  header; `analyze.py`/`compare.py` read that header, else auto-detect from the data, with a CLI
+  override. Fixes the **2R2T footgun** where `capture_and_correct.sh` defaulted `NOMINAL=30720000` but
+  the latch counts at 61.44 MHz in `mode=2r2t` (silently wrong ppm unless a human passed
+  `NOMINAL=61440000`). `read_counter.py` already reported the measured rate, so it needed no change.
 - **Build fixes for the `--prebuilt-bit` / no-Vivado path** (`docker-build-inner.sh`): (1) a silent
   `set -euo pipefail` crash on `ls "$VIVADO_PATH"/Vivado/*/settings64.sh | head` when no Vivado is
   present (`|| true`); (2) buildroot overlays aren't dependency-tracked, so an edited overlay (e.g.
