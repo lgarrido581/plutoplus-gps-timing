@@ -381,15 +381,17 @@ LOG=/var/log/xocorrect.log
 STATUS_REG=0x7C460008   # pps_counter STATUS; bit0 = pps_present (hw latch alive)
 
 start() {
-	# Only run on the hardware-latch bitstream (latch must capture PPS edges).
-	[ "$(devmem $STATUS_REG 32 2>/dev/null)" = "0x00000001" ] || {
-		echo "xo_correct: pps_counter HW latch not present; skipping"; return 0; }
-	printf "Starting xo_correct (waits for PPS lock): "
+	printf "Starting xo_correct (waits for PPS + chrony lock): "
 	(
-		# Wait for chrony to hold a PPS lock before disciplining, so PPS_DELTA
-		# reflects true GPS seconds. exec keeps this PID == the daemon's PID.
+		# Wait for BOTH pps_present (hw latch alive, set once the GPS PPS reaches F20)
+		# AND a chrony PPS lock, then discipline. At cold boot GPS isn't locked yet, so
+		# we must POLL for both here -- the old one-shot pps_present gate ran before GPS
+		# locked, "skipped", and never retried (daemon never autostarted). On a
+		# non-hwlatch build pps_present stays 0, so this never starts the daemon (intended).
+		# exec keeps this PID == the daemon's PID.
 		while :; do
-			chronyc tracking 2>/dev/null | grep -q 'Leap status *: *Normal' && break
+			[ "$(devmem $STATUS_REG 32 2>/dev/null)" = "0x00000001" ] && \
+				chronyc tracking 2>/dev/null | grep -q 'Leap status *: *Normal' && break
 			sleep 5
 		done
 		exec sh $DAEMON >> $LOG 2>&1

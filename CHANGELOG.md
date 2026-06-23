@@ -30,6 +30,10 @@ When PPS drops, the node now fails **safe and visible** instead of silently drif
   packaged `fpga` node is byte-identical (`sha256 b9d50963…`). The on-board TCXO holds *fine* timing
   only ~seconds; long holdover still needs an external OCXO/Rb reference (ROADMAP). Reflash to get the
   new daemon, or just `scp` the script to test.
+- **`S70xocorrect` autostart fix:** the init script gated on `pps_present` on its *first line*, which
+  at cold boot (GPS not locked yet) is 0 → it "skipped" and never retried, so `xo_correct` didn't
+  autostart until manually kicked. Now the background waiter **polls for both `pps_present` and a chrony
+  PPS lock**, then disciplines — robust across a cold boot.
 - **Build fixes for the `--prebuilt-bit` / no-Vivado path** (`docker-build-inner.sh`): (1) a silent
   `set -euo pipefail` crash on `ls "$VIVADO_PATH"/Vivado/*/settings64.sh | head` when no Vivado is
   present (`|| true`); (2) buildroot overlays aren't dependency-tracked, so an edited overlay (e.g.
