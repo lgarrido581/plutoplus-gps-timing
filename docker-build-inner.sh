@@ -569,7 +569,29 @@ regen(pdir + "/system_bd.tcl",
       "  set _tnet [get_bd_nets -quiet -of_objects [get_bd_pins axi_tdd_0/sync_in]]\n"
       "  if {$_tnet ne {}} {disconnect_bd_net $_tnet [get_bd_pins axi_tdd_0/sync_in]}\n"
       "  ad_connect pps_counter_0/pps_tick axi_tdd_0/sync_in\n"
+      # DMA-start GPS latch: FAN OUT tdd_channel_1 (= the RX-DMA sync, the
+      # transfer-start level) to pps_counter_0/latch_trig. This ONLY ADDS a load on
+      # the existing tdd_channel_1 net (no disconnect) -> normal RX is untouched and
+      # the DMA is never gated by us. On a TDD-gated capture, the channel-1 rising
+      # edge latches the free-run counter -> LATCH_COUNT (0x3C) = the exact cnt_clk
+      # count of sample[0], with no host read race. Defensive about pin names.
+      "  if {[llength [get_bd_pins -quiet axi_tdd_0/tdd_channel_1]] && "
+      "      [llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
+      "    ad_connect axi_tdd_0/tdd_channel_1 pps_counter_0/latch_trig\n"
+      "    puts \"pps_counter: latch_trig <- tdd_channel_1 (DMA-start GPS latch, fan-out)\"\n"
+      "  } elseif {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
+      "    ad_connect GND pps_counter_0/latch_trig\n"
+      "    puts \"pps_counter: WARN no tdd_channel_1; latch_trig tied 0\"\n"
+      "  }\n"
+      "} else {\n"
+      "  if {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {ad_connect GND pps_counter_0/latch_trig}\n"
       "}\n")
+      # NOTE: GPS-sequenced RX *gating* still needs NO BD change -- the base Pluto BD
+      # already wires axi_tdd_0/tdd_channel_1 -> axi_ad9361_adc_dma/sync (a LEVEL:
+      # the RX DMA transfers while sync is HIGH); sequencing is host-side (program
+      # axi_tdd channel-1 + arm the DMA). The latch above only OBSERVES that net.
+      # (An earlier attempt DROVE tdd_channel_1 from pps_counter/tdd_sync -- a 1-cyc
+      #  PULSE -- which starved the DMA and broke all RX. That was reverted.)
 
 # CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
 # NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
@@ -583,7 +605,10 @@ cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/in
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]\n")
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]\n"
+       # LATCH_COUNT/LATCH_SEQ 2-FF CDC (cnt_clk -> s_axi), changes <=1/frame like pps_count
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lc_s1_reg*}]\n"
+       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lseq_s1_reg*}]\n")
 if hwlatch:
     pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
            "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"

@@ -41,13 +41,19 @@
 `timescale 1ns/1ps
 
 module pps_counter #(
-    parameter integer C_S_AXI_ADDR_WIDTH = 6,
+    parameter integer C_S_AXI_ADDR_WIDTH = 7,   // 0x00-0x7C (added LATCH_* at 0x3C/0x40)
     parameter integer C_S_AXI_DATA_WIDTH = 32
 ) (
     // ---- counter clock domain ----
     input  wire                              cnt_clk,     // e.g. AD936x sample clk
     input  wire                              cnt_resetn,  // active-low reset
     input  wire                              pps_in,      // optional PPS (tie 0 if unused)
+    // DMA-start latch trigger: wire to axi_tdd tdd_channel_1 (= the RX-DMA sync =
+    // the transfer-start level). A rising edge latches the free-run counter ->
+    // LATCH_COUNT (0x3C) = the exact cnt_clk count of sample[0] of a TDD-gated
+    // capture, with NO host read race. Pure observe (a fan-out load) -> never gates
+    // the DMA, so it cannot wedge RX. Tie 0 if unused. Same cnt_clk domain (no CDC).
+    input  wire                              latch_trig,
     output wire [1:0]                        gpio_out,    // CTRL[5:4]: test outputs (I/O voltage probe)
 
     // ---- PPS-aligned TDD frame timing (cnt_clk domain) ----
@@ -224,6 +230,30 @@ module pps_counter #(
     always @(posedge s_axi_aclk) begin gray_s1 <= gray_cnt; gray_s2 <= gray_s1; end
     wire [31:0] live_count = gray2bin(gray_s2);
 
+    // ----------------------------------------------------------------- //
+    // DMA-start latch: capture `counter` on a rising edge of latch_trig
+    // (= axi_tdd tdd_channel_1 = the RX-DMA sync). latch_count then holds the
+    // exact cnt_clk count of the capture's first sample. tdd_channel_1 is in the
+    // cnt_clk (l_clk) domain, so the capture is glitch-free, same-domain. The
+    // value changes only on a capture (<=1/frame) -> simple 2-FF sync to AXI like
+    // pps_count. latch_seq increments per latch so the host can tell it is fresh.
+    // ----------------------------------------------------------------- //
+    reg [31:0] latch_count = 32'd0;
+    reg [31:0] latch_seq   = 32'd0;
+    reg        ltrig_d     = 1'b0;
+    always @(posedge cnt_clk) begin
+        ltrig_d <= latch_trig;
+        if (latch_trig & ~ltrig_d) begin           // rising edge = transfer start
+            latch_count <= counter;
+            latch_seq   <= latch_seq + 32'd1;
+        end
+    end
+    reg [31:0] lc_s1, lc_s2, lseq_s1, lseq_s2;
+    always @(posedge s_axi_aclk) begin
+        lc_s1   <= latch_count; lc_s2   <= lc_s1;
+        lseq_s1 <= latch_seq;   lseq_s2 <= lseq_s1;
+    end
+
     // PPS_* change <=1/sec -> simple 2-FF sync into AXI domain
     reg [31:0] ppsc_s1, ppsc_s2, ppsd_s1, ppsd_s2, ppss_s1, ppss_s2;
     always @(posedge s_axi_aclk) begin
@@ -254,7 +284,7 @@ module pps_counter #(
             else s_axi_wready <= 1'b0;
             // perform write
             if (s_axi_awready && s_axi_awvalid && s_axi_wready && s_axi_wvalid) begin
-                case (awaddr_q[5:2])
+                case (awaddr_q[6:2])
                     4'h1: begin                       // 0x04 CTRL
                         ctrl_enable <= s_axi_wdata[0];
                         ctrl_clear  <= s_axi_wdata[1];
@@ -284,7 +314,7 @@ module pps_counter #(
             else s_axi_arready <= 1'b0;
             if (s_axi_arready && s_axi_arvalid && !s_axi_rvalid) begin
                 s_axi_rvalid <= 1'b1; s_axi_rresp <= 2'b00;
-                case (s_axi_araddr[5:2])
+                case (s_axi_araddr[6:2])
                     4'h0: s_axi_rdata <= 32'h50505343;     // "PPSC"
                     4'h1: s_axi_rdata <= {26'd0, ctrl_gpio, 2'b00, ctrl_enable};
                     4'h2: s_axi_rdata <= {31'd0, pps_present};
@@ -300,6 +330,8 @@ module pps_counter #(
                     4'hC: s_axi_rdata <= tx_stop;             // TX_STOP
                     4'hD: s_axi_rdata <= frame_pos;           // FRAME_POS (live)
                     4'hE: s_axi_rdata <= fseq_s2;             // FRAME_SEQ (since PPS)
+                    5'h0F: s_axi_rdata <= lc_s2;              // 0x3C LATCH_COUNT (sample[0] cnt)
+                    5'h10: s_axi_rdata <= lseq_s2;            // 0x40 LATCH_SEQ (latches seen)
                     default: s_axi_rdata <= 32'd0;
                 endcase
             end else if (s_axi_rvalid && s_axi_rready) s_axi_rvalid <= 1'b0;
