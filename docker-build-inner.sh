@@ -577,8 +577,18 @@ regen(pdir + "/system_bd.tcl",
       # count of sample[0], with no host read race. Defensive about pin names.
       "  if {[llength [get_bd_pins -quiet axi_tdd_0/tdd_channel_1]] && "
       "      [llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
-      "    ad_connect axi_tdd_0/tdd_channel_1 pps_counter_0/latch_trig\n"
-      "    puts \"pps_counter: latch_trig <- tdd_channel_1 (DMA-start GPS latch, fan-out)\"\n"
+      # FAN-OUT done right: ADD latch_trig to the EXISTING tdd_channel_1 net (the
+      # one already driving adc_dma/sync). Using ad_connect here instead created a
+      # NEW net and ORPHANED adc_dma/sync -> broke all RX. connect_bd_net -net adds
+      # a sink without disturbing the existing connection.
+      "    set _cnet [get_bd_nets -quiet -of_objects [get_bd_pins axi_tdd_0/tdd_channel_1]]\n"
+      "    if {$_cnet ne {}} {\n"
+      "      connect_bd_net -net $_cnet [get_bd_pins pps_counter_0/latch_trig]\n"
+      "      puts \"pps_counter: latch_trig added to tdd_channel_1 net $_cnet (DMA-start latch)\"\n"
+      "    } else {\n"
+      "      ad_connect axi_tdd_0/tdd_channel_1 pps_counter_0/latch_trig\n"
+      "      puts \"pps_counter: latch_trig <- tdd_channel_1 (no existing net; direct)\"\n"
+      "    }\n"
       "  } elseif {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
       "    ad_connect GND pps_counter_0/latch_trig\n"
       "    puts \"pps_counter: WARN no tdd_channel_1; latch_trig tied 0\"\n"
