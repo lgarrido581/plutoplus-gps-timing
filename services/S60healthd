@@ -1,0 +1,33 @@
+#!/bin/sh
+# S60healthd - serve the read-only DSN /health endpoint via busybox httpd.
+# CGI at /cgi-bin/health (see services/health_cgi.sh). Bound to the HARDWARE-LAN IP
+# only -- never all interfaces / the tailnet (GPS position is sensitive; the link to
+# the Jetson is the trust boundary). Read-only; no auth needed on that private link.
+DOCROOT=/www
+PORT="${HEALTH_PORT:-8080}"
+PIDFILE=/var/run/healthd.pid
+
+hw_ip() {
+	# the Pluto<->Jetson hardware LAN (static 192.168.50.x); fall back to localhost
+	ip -4 addr show 2>/dev/null | grep -oE '192\.168\.50\.[0-9]+' | head -1
+}
+
+start() {
+	IP="$(hw_ip)"; [ -n "$IP" ] || IP=127.0.0.1
+	printf "Starting healthd on %s:%s: " "$IP" "$PORT"
+	# busybox httpd backgrounds itself; record the pid for stop()
+	httpd -p "$IP:$PORT" -h "$DOCROOT" && pidof httpd > "$PIDFILE" 2>/dev/null \
+		&& echo "OK" || echo "Failed"
+}
+stop() {
+	printf "Stopping healthd: "
+	[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+	rm -f "$PIDFILE"; echo "OK"
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0

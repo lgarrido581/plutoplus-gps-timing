@@ -417,6 +417,19 @@ EOF
     info "  rootfs overlay: xo_correct.sh + S70xocorrect (GPS sample-clock discipline) written"
 fi
 
+# DSN /health endpoint: read-only timing+GPS over busybox httpd (CGI), bound to the
+# hardware-LAN IP. Lets the sensing app read pps/xo + GPS without root SSH/devmem
+# (DistributedSensingNetwork docs/HEALTH_API.md). services/ is mounted at
+# /build/services-src by docker-run.sh. Needs busybox FEATURE_HTTPD + _CGI (on).
+if [ -f /build/services-src/health_cgi.sh ]; then
+    mkdir -p "$GPS_OVL/www/cgi-bin"
+    cp /build/services-src/health_cgi.sh "$GPS_OVL/www/cgi-bin/health"
+    chmod +x "$GPS_OVL/www/cgi-bin/health"
+    cp /build/services-src/S60healthd "$GPS_OVL/etc/init.d/S60healthd"
+    chmod +x "$GPS_OVL/etc/init.d/S60healthd"
+    info "  rootfs overlay: /health CGI + S60healthd (busybox httpd) written"
+fi
+
 # Post-build script: delete buildroot's generic serial getty from inittab so the
 # GPS UART (ttyPS0) has no login console competing with gpsd. Runs AFTER the
 # getty finalize hook. USB console (ttyGS0) is left intact.
