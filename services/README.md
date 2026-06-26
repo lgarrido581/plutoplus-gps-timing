@@ -13,7 +13,7 @@ Pluto's timing / GPS / RF / DMA state **without root SSH or `devmem`**.
 `pluto_zmqd` links **libzmq**, so unlike a shell CGI it can't just be dropped into the
 rootfs overlay — it must be cross-compiled. `docker-build-inner.sh` turns these files
 into a **buildroot package** (`buildroot/package/pluto-zmqd`, `select`s
-`BR2_PACKAGE_ZMQ`) so libzmq builds first and the target toolchain/sysroot are used.
+`BR2_PACKAGE_ZEROMQ`) so libzmq builds first and the target toolchain/sysroot are used.
 The package installs `pluto_zmqd → /usr/bin` and `S65zmqapi → /etc/init.d`.
 
 `services/` is mounted at `/build/services-src` by `docker-run.sh`. A normal base build

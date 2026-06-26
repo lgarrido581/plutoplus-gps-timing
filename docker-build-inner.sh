@@ -296,7 +296,7 @@ config BR2_PACKAGE_PLUTO_ZMQD
 	bool "pluto-zmqd"
 	depends on BR2_INSTALL_LIBSTDCPP
 	depends on BR2_TOOLCHAIN_HAS_THREADS
-	select BR2_PACKAGE_ZMQ
+	select BR2_PACKAGE_ZEROMQ
 	help
 	  Read-only ZMQ telemetry daemon (timing/gps/rf/dma) for the
 	  Pluto+ GPS-timing firmware. PUB 1 Hz snapshot + REP op reads,
@@ -309,7 +309,7 @@ EOF
 PLUTO_ZMQD_VERSION = 1.0
 PLUTO_ZMQD_SITE = $(TOPDIR)/package/pluto-zmqd
 PLUTO_ZMQD_SITE_METHOD = local
-PLUTO_ZMQD_DEPENDENCIES = zmq
+PLUTO_ZMQD_DEPENDENCIES = zeromq
 PLUTO_ZMQD_LICENSE = MIT
 
 define PLUTO_ZMQD_BUILD_CMDS
@@ -330,9 +330,11 @@ EOF
     if ! grep -q 'package/pluto-zmqd/Config.in' buildroot/package/Config.in; then
         echo 'source "package/pluto-zmqd/Config.in"' >> buildroot/package/Config.in
     fi
-    # C++ daemon linking libzmq -> need libstdc++ on target + the zmq package.
+    # C++ daemon linking libzmq -> need libstdc++ on target + the zeromq package
+    # (buildroot 2023.02 names the libzmq package "zeromq", symbol BR2_PACKAGE_ZEROMQ).
+    sed -i '/^BR2_PACKAGE_ZMQ=/d' "$BR_CFG"   # scrub a stale name from earlier runs
     set_kcfg "$BR_CFG" BR2_INSTALL_LIBSTDCPP  'BR2_INSTALL_LIBSTDCPP=y'
-    set_kcfg "$BR_CFG" BR2_PACKAGE_ZMQ        'BR2_PACKAGE_ZMQ=y'
+    set_kcfg "$BR_CFG" BR2_PACKAGE_ZEROMQ     'BR2_PACKAGE_ZEROMQ=y'
     set_kcfg "$BR_CFG" BR2_PACKAGE_PLUTO_ZMQD 'BR2_PACKAGE_PLUTO_ZMQD=y'
     # Force a recompile so daemon source edits actually ship (the local SITE re-rsyncs
     # each build, but the build stamp would otherwise skip recompiling).

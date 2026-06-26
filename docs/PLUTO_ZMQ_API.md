@@ -139,8 +139,9 @@ when found. A wedge that doesn't log will still read `rx_ok=true` — so use it 
 
 ## Build & runtime
 
-- **Dependency:** `libzmq`, enabled via `BR2_PACKAGE_ZMQ` (auto-selected by the
-  package). This is the one new runtime library vs. the shell-only `/health`. The
+- **Dependency:** `libzmq`, enabled via `BR2_PACKAGE_ZEROMQ` (auto-selected by the
+  package; buildroot 2023.02 names the libzmq package `zeromq`). This is the one new
+  runtime library vs. the shell-only `/health`. The
   daemon is C++ and also needs `libstdc++` (`BR2_INSTALL_LIBSTDCPP=y`).
 - **Package:** `buildroot/package/pluto-zmqd` — a buildroot package (created by
   `docker-build-inner.sh` from `services/pluto_zmqd.cpp` + `services/S65zmqapi`). It is
