@@ -67,6 +67,7 @@ docker run --rm \
     -v "$(pwd)/output:/build/output" \
     -v "plutoplus-src-cache:/build/src" \
     -v "$(pwd)/hdl:/build/hdl-src:ro" \
+    -v "$(pwd)/services:/build/services-src:ro" \
     $VIVADO_MOUNT \
     $PREBUILT_MOUNT \
     $EXTRA_ENV \

@@ -17,6 +17,7 @@ no local Xilinx install is needed for the base firmware.
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
 [Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
+[ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
 
 ---
@@ -30,6 +31,7 @@ no local Xilinx install is needed for the base firmware.
 | **Stratum‑1 system clock** | chrony disciplines time from GPS (coarse) + **PPS** (precise) |
 | **LAN NTP server** | serves GPS time to RFC1918 + IPv6 link‑local once locked — see [NTP](docs/NTP.md) |
 | **Diagnostics** | `ppstest`, `gpsmon`, `cgps`, `gpspipe` |
+| **Read-only ZMQ telemetry API** | `pluto_zmqd` serves timing/GPS/RF/DMA over ZMQ (PUB `:5560` + REP `:5561`) so a consumer reads node state **without root SSH/`devmem`** — bound to the hw-LAN only, autostarts at boot. See [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) |
 | **GPS‑disciplined sample clock** *(`--hwlatch`)* | FPGA `pps_counter` + `xo_correct.sh` lock the AD936x sample clock to GPS for `xo_correction`/TDOA — see [FPGA counter](hdl/pps_counter/README.md) |
 | **GPS‑aligned TDD** *(`--hwlatch`, v1.4)* | `pps_counter` emits a PPS‑edge `pps_tick` that re‑anchors ADI's `axi_tdd` frame each GPS second → TX/RX windows phase‑locked to GPS across nodes. Verify with `tdd_verify.sh`; design in [PPS‑aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) |
 
