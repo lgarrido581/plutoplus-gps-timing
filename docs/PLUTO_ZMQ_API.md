@@ -1,5 +1,10 @@
 # Pluto ZMQ telemetry API — read-only timing / GPS / RF / DMA
 
+> **Formal interface spec:** [`docs/PLUTO_ZMQ_ICD.md`](PLUTO_ZMQ_ICD.md) is the
+> authoritative wire ICD (per-field data dictionary, message catalog, framing, error
+> matrix, versioning — conformance-tested against the binary). This page is the
+> design/integration overview.
+
 A read-only **ZMQ** API (`pluto_zmqd`) that exposes everything a sensing consumer
 (DistributedSensingNetwork, "DSN") currently needs **root SSH + `devmem`/`gpspipe`**
 for. With this running, the two read-only SSH paths can be retired:

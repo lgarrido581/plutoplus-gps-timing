@@ -17,7 +17,7 @@ no local Xilinx install is needed for the base firmware.
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
 [Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
-[ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) ·
+[ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) · [ZMQ API ICD](docs/PLUTO_ZMQ_ICD.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
 
 ---
