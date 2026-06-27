@@ -7,7 +7,7 @@
 | **Consumer** | DistributedSensingNetwork ("DSN") node agent, or any ZMQ client |
 | **Transport** | ZeroMQ over TCP (libzmq 4.x wire protocol, ZMTP/3.0) |
 | **Encoding** | UTF-8 JSON, one object per ZMQ message (single frame, no trailing newline) |
-| **Status** | Implemented, built, and **conformance-tested off-hardware** (§13); pending on-hardware checks of `rf`/counter |
+| **Status** | Implemented, built, and **hardware-validated** end-to-end (§13) |
 | **Source of truth** | `services/pluto_zmqd.cpp`. This ICD documents that binary as built. |
 
 This ICD is the **authoritative wire specification**. `docs/PLUTO_ZMQ_API.md` is the
@@ -130,12 +130,18 @@ Source: FPGA `pps_counter` AXI registers via `/dev/mem` mmap @ `0x7C460000`, and
 | `pps_advancing` | boolean \| null | — | until 2 PUB ticks elapse, or no counter | — | SEQ increased over the last 1 Hz tick |
 | `pps_seq` | integer \| null | count | no counter | 0…2³²−1 (wraps) | SEQ reg `0x7C460018` |
 | `xo_ppm` | number \| null | ppm | no `xocorrect.log` value | ~ −50…+50 | last logged xo_correction error |
-| `cnt_clk_hz` | integer \| null | Hz | no counter | sample-clock rate | DELTA reg `0x7C460014` (counts between PPS) |
+| `cnt_clk_hz` | integer \| null | Hz | no counter | ≈ AD9361 `l_clk` | DELTA reg `0x7C460014`: `l_clk` ticks counted in one PPS second (see note) |
 
 Notes: `pps_present` is true only on a `--hwlatch` bitstream after the GPS PPS reaches
 F20. On a base (no-counter) build, `pps_present=false` and the three numeric fields are
 `null`. `pps_advancing` is computed only on the 1 Hz tick (a sub-second REP reports the
 cached verdict but reads `pps_present`/`pps_seq`/`cnt_clk_hz` live).
+
+`cnt_clk_hz` is the counter's clock — the AD9361 `l_clk` (data-path clock) — counted
+over one GPS PPS second, i.e. the `l_clk` **frequency in Hz**. It is the data clock, a
+multiple of the baseband `rf.sample_rate_hz` (e.g. **2×** in 2R2T: `61_440_001` for a
+`30_720_000` rate). GPS-disciplined it sits within ±1 count of nominal — the basis for
+`xo_ppm`.
 
 ### 6.2 `gps` (sparse — a key appears only with a fresh value)
 
@@ -157,6 +163,9 @@ fix the object may be `{}` or carry only `mode`.
 | `speed_mps` | number | m/s | ≥0 | TPV `speed` |
 | `track_deg` | number | ° | 0…360 | TPV `track` |
 | `climb_mps` | number | m/s | — | TPV `climb` |
+
+Any field gpsd does not report is omitted: e.g. `track_deg`/`climb_mps` are absent while
+stationary, and `alt_*`/`epv_m` are absent on a 2-D fix. Consumers treat absent ⇒ unknown.
 
 ### 6.3 `rf` (sparse — a key appears only if its sysfs attribute is readable)
 
@@ -209,7 +218,7 @@ exactly one well-formed JSON reply.
 | PUB period | 1000 ms | monotonic; catches up after a stall without bursting |
 | GPS staleness window | 5000 ms | older TPV/SKY fields are dropped |
 | gpsd reconnect backoff | ~2000 ms | on disconnect/error |
-| REP latency | sub-ms typical | registers + sysfs read live per request |
+| REP latency | sub-ms server-side | registers + sysfs read live per request; network RTT adds to wall-clock |
 | `dma` last_error cap | 200 chars | truncated |
 
 ## 9. Versioning & compatibility
@@ -252,7 +261,7 @@ REP (request → reply):
 
 -> {"op":"timing"}
 <- {"schema":"dsn.health/1","api":"dsn.pluto_zmq/1","t_unix":1750000000,
-    "timing":{"pps_present":true,"pps_advancing":true,"pps_seq":42,"xo_ppm":0.0,"cnt_clk_hz":30720000}}
+    "timing":{"pps_present":true,"pps_advancing":true,"pps_seq":42,"xo_ppm":0.0,"cnt_clk_hz":61440000}}
 ```
 
 PUB (one 1 Hz frame; subscriber uses an empty subscription):
@@ -260,10 +269,10 @@ PUB (one 1 Hz frame; subscriber uses an empty subscription):
 ```
 {"schema":"dsn.health/1","api":"dsn.pluto_zmq/1","node_id":"pluto","t_unix":1750000000,
  "uptime_s":12345,
- "timing":{"pps_present":true,"pps_advancing":true,"pps_seq":42,"xo_ppm":0.0,"cnt_clk_hz":30720000},
+ "timing":{"pps_present":true,"pps_advancing":true,"pps_seq":42,"xo_ppm":0.0,"cnt_clk_hz":61440000},
  "gps":{"mode":3,"lat_deg":37.1234567,"lon_deg":-122.7654321,"alt_hae_m":42.7,"alt_msl_m":75.3,
         "geoid_sep_m":-32.6,"eph_m":3.1,"epv_m":5.4,"n_sat_used":9,"speed_mps":0.03,"track_deg":118.2,"climb_mps":0.0},
- "rf":{"phy":"ad9361-phy","rx_lo_hz":2400000000,"tx_lo_hz":2400000000,"sample_rate_hz":30720000,
+ "rf":{"phy":"ad9361-phy","rx_lo_hz":2400000000,"tx_lo_hz":2450000000,"sample_rate_hz":30720000,
        "rf_bandwidth_hz":18000000,"rx_gain_db":71.0,"gain_control_mode":"slow_attack","rf_port_select":"A_BALANCED"},
  "dma":{"rx_ok":true,"last_error":null}}
 ```
@@ -280,15 +289,14 @@ the full §6.2 `gps` data dictionary with lat/lon precision preserved; §6.4 `dm
 §4.2/§4.3 PUB framing (single frame, valid JSON, no trailing newline, and a
 non-matching subscription receiving nothing — proving there is no topic prefix).
 
-Inherently **on-hardware** (not covered off-target): `rf` field *values* (require
-`ad9361-phy` sysfs — the absence path `rf:{}` is verified), and counter-present
-`timing` values (`pps_present=true`, real `pps_seq`/`cnt_clk_hz`/`pps_advancing` —
-require the `--hwlatch` `pps_counter` at `0x7C460000`).
-
-**On-hardware run** (Pluto+ at a 3-D fix, `--hwlatch` firmware): REP `ping`/`snapshot`
-and the 1 Hz PUB heartbeat were exercised over TCP from a LAN client. Confirmed live:
-`timing` with `pps_present=true`, advancing `pps_seq`, `xo_ppm=0.000`, `cnt_clk_hz`;
-real `gps` 3-D fix (with `track_deg` correctly omitted while stationary — sparse-block
-behavior); and real `rf` chip values. This run also caught and fixed `rx_gain_db` being
-emitted as `"71.000000 dB"` (string) — the daemon now strips the unit and emits the
-number, matching §6.3.
+Two aspects can't be exercised off-target — `rf` field *values* (need `ad9361-phy`
+sysfs; off-target only the absence path `rf:{}` is checked) and counter-present `timing`
+values (need the `--hwlatch` `pps_counter` at `0x7C460000`). Both were then covered by an
+**on-hardware run** (Pluto+ at a 3-D fix, `--hwlatch` firmware): REP `ping`/`snapshot`
+and the 1 Hz PUB heartbeat exercised over TCP from a LAN client. Confirmed live:
+`timing` with `pps_present=true`, advancing `pps_seq`, `xo_ppm=0.0`, `cnt_clk_hz` (≈2×
+`sample_rate_hz`); a real `gps` 3-D fix (`track_deg` correctly omitted while stationary);
+and real `rf` chip values. The run also surfaced and fixed two issues now in the binary:
+`rx_gain_db` was emitted as `"71.000000 dB"` (string) — the daemon now strips the unit
+and emits the number (§6.3); and the bind defaulted to a hardcoded subnet that left it on
+loopback — now `0.0.0.0` by default with a `ZMQ_BIND` override (§4.1).

@@ -79,7 +79,8 @@ sending again.
     "xo_ppm":        0.0,          // last value the xocorrect daemon logged. It auto-derives
                                    //   nominal from live rate x channel mode, so it is correct
                                    //   in 1R1T and 2R2T (no client-side guess). null if absent.
-    "cnt_clk_hz":    30720000      // DELTA reg = cnt_clk counts between PPS = the sample clock
+    "cnt_clk_hz":    61440000      // DELTA reg = AD9361 l_clk ticks per PPS second (data clock,
+                                   //   ~2x sample_rate in 2R2T). GPS-disciplined; basis for xo_ppm.
   },
 
   "gps": {                         // gpsd (persistent client). Only fields with a value appear.
