@@ -6,7 +6,7 @@ Pluto's timing / GPS / RF / DMA state **without root SSH or `devmem`**.
 | file | role |
 |---|---|
 | `pluto_zmqd.cpp` | the **ZMQ telemetry daemon** — aggregates `pps_counter` (devmem mmap) + `xocorrect.log` (`xo_ppm`) + `gpsd` (persistent client) + `ad9361-phy` sysfs (`rf`) + kernel-log scan (`dma`) into JSON, served over **PUB :5560** (1 Hz snapshot) and **REP :5561** (op reads). Read-only by construction. Contract: [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md). |
-| `S65zmqapi` | init script: launches `pluto_zmqd` bound to the **hardware-LAN IP** (`192.168.50.x`), after `gpsd` + networking. |
+| `S65zmqapi` | init script: launches `pluto_zmqd` bound to **all interfaces** (`0.0.0.0`; override `ZMQ_BIND=<ip>`), after `gpsd` + networking. |
 
 ## How it's built
 
@@ -29,9 +29,7 @@ bash docker-run.sh        # -> output/pluto.frm  (no Vivado needed)
 # one snapshot to stdout, no sockets (validate data-gathering over SSH):
 ssh root@pluto.local 'pluto_zmqd --print'
 
-# live API for ad-hoc testing (all-ifaces bind is TEST ONLY; the shipped init script
-# binds the hw-LAN IP only):
-ssh root@pluto.local 'pluto_zmqd --bind 0.0.0.0 &'
+# live API: the shipped daemon already binds 0.0.0.0, so just hit it over the network:
 python3 -c "import zmq,json;c=zmq.Context();s=c.socket(zmq.REQ);s.connect('tcp://pluto.local:5561');s.send_string('ping');print(s.recv())"
 ```
 

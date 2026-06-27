@@ -48,10 +48,14 @@ interface — **this interface performs no writes of any kind**).
 | PUB | `ZMQ_PUB` | `tcp://<bind>:5560` | provider→consumer | unsolicited 1 Hz snapshot |
 | REP | `ZMQ_REP` | `tcp://<bind>:5561` | request/reply | synchronous on-demand read |
 
-- `<bind>` = the hardware-LAN IPv4 address matching `192.168.50.x`, else `127.0.0.1`
-  (resolved by `S65zmqapi`). The provider **never** binds `0.0.0.0` in normal operation.
+- `<bind>` = `0.0.0.0` (all interfaces) by default — the Pluto's LAN subnet is not
+  knowable in advance, so `S65zmqapi` binds all interfaces. Override with env `ZMQ_BIND`
+  = a specific IPv4 address to restrict it to one interface. (The daemon's own default
+  when run with no `--bind` is `127.0.0.1`.)
 - Ports overridable: env `ZMQ_PUB_PORT` / `ZMQ_REP_PORT` (init script), or
   `--pub-port` / `--rep-port` / `--bind` (daemon args).
+- The provider serves identical content on every bound interface; the data is
+  read-only. See §10 for the confidentiality model.
 
 ### 4.2 Socket patterns
 
@@ -220,10 +224,13 @@ exactly one well-formed JSON reply.
 ## 10. Security
 
 - **Read-only by construction.** No op writes any register, retunes, or initiates a
-  capture.
-- **Confidentiality boundary = the hardware-LAN link.** Bind is restricted to
-  `192.168.50.x`; the `gps` block contains position, so the interface is **never**
-  exposed on the tailnet/internet. No socket-level auth on the private link.
+  capture. There is no socket-level auth.
+- **Confidentiality boundary = the Pluto's local interfaces.** By default the provider
+  binds all interfaces (`0.0.0.0`), serving the same read-only telemetry on each. The
+  `gps` block contains position, so this is appropriate only because the Pluto's
+  interfaces are local (wired LAN + USB gadget) and the box is **not** placed on the
+  tailnet by design (the edge host is the tailnet node). To narrow the exposure to a
+  single interface, set `ZMQ_BIND` to that address.
 - For untrusted networks: do not merely change the bind — add CurveZMQ (encryption +
   client keys) and coarsen/round `gps` position. Such a deployment is a new interface
   revision, not a config tweak.
@@ -277,3 +284,11 @@ Inherently **on-hardware** (not covered off-target): `rf` field *values* (requir
 `ad9361-phy` sysfs — the absence path `rf:{}` is verified), and counter-present
 `timing` values (`pps_present=true`, real `pps_seq`/`cnt_clk_hz`/`pps_advancing` —
 require the `--hwlatch` `pps_counter` at `0x7C460000`).
+
+**On-hardware run** (Pluto+ at a 3-D fix, `--hwlatch` firmware): REP `ping`/`snapshot`
+and the 1 Hz PUB heartbeat were exercised over TCP from a LAN client. Confirmed live:
+`timing` with `pps_present=true`, advancing `pps_seq`, `xo_ppm=0.000`, `cnt_clk_hz`;
+real `gps` 3-D fix (with `track_deg` correctly omitted while stationary — sparse-block
+behavior); and real `rf` chip values. This run also caught and fixed `rx_gain_db` being
+emitted as `"71.000000 dB"` (string) — the daemon now strips the unit and emits the
+number, matching §6.3.

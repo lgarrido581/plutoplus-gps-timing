@@ -6,9 +6,10 @@ All notable changes to this project. Versions are git tags.
 - **`services/pluto_zmqd.cpp` + `services/S65zmqapi`:** a read-only **ZMQ** telemetry daemon so a
   consumer (DSN) can read the Pluto's state **without root SSH / `devmem`/`gpspipe`** — retiring the
   two read-only SSH paths (IQ capture stays as-is). **PUB `:5560`** (1 Hz JSON snapshot; absence of
-  frames is the liveness signal) + **REP `:5561`** (`snapshot|timing|gps|rf|dma|ping`). Bound to the
-  **hardware-LAN IP only** (never the tailnet — GPS position is sensitive). **Read-only by
-  construction**; capture/retune are v2 on a separate authed socket.
+  frames is the liveness signal) + **REP `:5561`** (`snapshot|timing|gps|rf|dma|ping`). Binds
+  **all interfaces** (`0.0.0.0`) by default — the LAN subnet isn't knowable in advance;
+  set `ZMQ_BIND=<ip>` to restrict it (read-only data on the Pluto's local links; not on the
+  tailnet by design). **Read-only by construction**; capture/retune are v2 on a separate authed socket.
 - **Blocks:** `timing` (pps_counter via `/dev/mem` mmap + `xo_ppm` from `xocorrect.log`) and `gps`
   (persistent gpsd client) reuse the **exact `dsn.health/1` field names** (DSN's parser is transport-
   agnostic); plus new `rf` (actual `ad9361-phy` LO/rate/bw/gain — catches the silent LO clamp) and
@@ -19,6 +20,11 @@ All notable changes to this project. Versions are git tags.
 - **Docs:** design overview **`docs/PLUTO_ZMQ_API.md`** + formal **`docs/PLUTO_ZMQ_ICD.md`**
   (per-field data dictionary, message catalog, framing/error/versioning) — conformance-tested
   54/54 against the built binary.
+- **Validated on hardware:** flashed to a Pluto+ at a 3-D fix; REP `ping`/`snapshot` + the 1 Hz
+  PUB heartbeat exercised over TCP from a LAN client. Live `timing` (`pps_present`, advancing
+  `pps_seq`, `xo_ppm`, `cnt_clk_hz`), real `gps` + `rf`. The run caught two fixes: the bind
+  default (`0.0.0.0` instead of a hardcoded subnet) and `rx_gain_db` now emitted as a number
+  (the chip reports `"71.000000 dB"`; the daemon strips the unit).
 
 ## Unreleased — Networked TDOA (Phase 2)
 - **`docs/NETWORK.md`:** architecture for a multi-site passive-localization network — Jetson Nano

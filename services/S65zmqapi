@@ -1,29 +1,26 @@
 #!/bin/sh
 # S65zmqapi - read-only ZMQ telemetry API (timing/gps/rf/dma) via pluto_zmqd.
 #
-# Bound to the HARDWARE-LAN IP only (the private Pluto<->consumer link) -- never all
-# interfaces / the tailnet (GPS position is sensitive; that link is the trust
-# boundary). Read-only by construction; no auth needed on that private link.
+# Binds ALL interfaces (0.0.0.0) by default -- the Pluto's LAN subnet is not knowable
+# in advance (DHCP/site-dependent), so a hardcoded subnet is fragile. The data is
+# READ-ONLY and the Pluto's interfaces are local (wired LAN + USB gadget); the box is
+# not placed on the tailnet by design, so this exposes telemetry only on those local
+# links. To restrict it to one address, set ZMQ_BIND to a specific IP (e.g. in
+# /etc/default or the environment). For untrusted networks, add CurveZMQ + coarsen GPS.
 #
 # Starts after gpsd (S50) so the daemon's gpsd client connects immediately, and after
-# networking so the hw-LAN IP exists. PUB :5560 (1 Hz snapshot) + REP :5561 (op reads).
-# See docs/PLUTO_ZMQ_API.md.
+# networking. PUB :5560 (1 Hz snapshot) + REP :5561 (op reads). See docs/PLUTO_ZMQ_API.md.
 DAEMON=/usr/bin/pluto_zmqd
 PIDFILE=/var/run/pluto_zmqd.pid
+BIND="${ZMQ_BIND:-0.0.0.0}"
 PUB_PORT="${ZMQ_PUB_PORT:-5560}"
 REP_PORT="${ZMQ_REP_PORT:-5561}"
 
-hw_ip() {
-	# the Pluto<->consumer hardware LAN (static 192.168.50.x); fall back to localhost
-	ip -4 addr show 2>/dev/null | grep -oE '192\.168\.50\.[0-9]+' | head -1
-}
-
 start() {
-	IP="$(hw_ip)"; [ -n "$IP" ] || IP=127.0.0.1
-	printf "Starting pluto_zmqd on %s (PUB %s / REP %s): " "$IP" "$PUB_PORT" "$REP_PORT"
+	printf "Starting pluto_zmqd on %s (PUB %s / REP %s): " "$BIND" "$PUB_PORT" "$REP_PORT"
 	# -b: background the foreground daemon; -m: write the pidfile for stop().
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
-		--bind "$IP" --pub-port "$PUB_PORT" --rep-port "$REP_PORT" \
+		--bind "$BIND" --pub-port "$PUB_PORT" --rep-port "$REP_PORT" \
 		&& echo "OK" || echo "Failed"
 }
 stop() {

@@ -29,15 +29,16 @@ that HTTP polling can't give cheaply.
 
 ## Transport
 
-Two ZMQ sockets, JSON bodies (UTF-8, one JSON object per message), **bound to the
-hardware-LAN IP only** (`192.168.50.x`; falls back to `127.0.0.1` if that link is
-absent). Never the tailnet — GPS position is sensitive and that private link is the
-trust boundary.
+Two ZMQ sockets, JSON bodies (UTF-8, one JSON object per message), **bound to all
+interfaces (`0.0.0.0`) by default** — the Pluto's LAN subnet isn't knowable in advance,
+so a hardcoded subnet is fragile. Override `ZMQ_BIND` to pin it to one IP. The data is
+read-only and the Pluto's interfaces are local (wired LAN + USB); it is not on the
+tailnet by design. See [Security](#security).
 
 | socket | endpoint              | pattern | use |
 |--------|-----------------------|---------|-----|
-| **PUB** | `tcp://<hw-ip>:5560` | publish | 1 Hz full snapshot. **Absence of frames is the liveness signal** — no failed-SSH timeout dance. Subscribe with an empty filter (`""`) to get every frame. |
-| **REP** | `tcp://<hw-ip>:5561` | request/reply | a fresh **synchronous** read — for the per-cycle admission gate that wants a definite answer *now*. |
+| **PUB** | `tcp://<bind>:5560` | publish | 1 Hz full snapshot. **Absence of frames is the liveness signal** — no failed-SSH timeout dance. Subscribe with an empty filter (`""`) to get every frame. |
+| **REP** | `tcp://<bind>:5561` | request/reply | a fresh **synchronous** read — for the per-cycle admission gate that wants a definite answer *now*. |
 
 Ports are overridable via `ZMQ_PUB_PORT` / `ZMQ_REP_PORT` (see the init script).
 
@@ -133,10 +134,12 @@ when found. A wedge that doesn't log will still read `rx_ok=true` — so use it 
 
 - **Read-only by construction.** No op writes any register, retunes, or captures.
   Capture/retune are deliberately **v2**, planned on a *separate, authenticated*
-  socket — never folded into this one.
-- **Hardware-LAN bind only.** The init script resolves the `192.168.50.x` address and
-  binds only that; it never binds `0.0.0.0` or the tailnet. The private Pluto↔consumer
-  link is the trust boundary, so there is no auth on the socket itself.
+  socket — never folded into this one. No socket-level auth.
+- **Binds all interfaces by default (`0.0.0.0`).** The Pluto's LAN subnet isn't
+  knowable ahead of time, so the init script binds everything and serves the same
+  read-only telemetry on each interface. This is acceptable because the Pluto's
+  interfaces are local (wired LAN + USB gadget) and the box is not on the tailnet by
+  design. To narrow it to one interface, set `ZMQ_BIND=<ip>`.
 - If you ever need this on a shared/untrusted network, do **not** just change the bind
   — add CurveZMQ (encryption + client auth) and coarsen/round `gps` position first.
 
@@ -153,7 +156,7 @@ when found. A wedge that doesn't log will still read `rx_ok=true` — so use it 
   a real package (not a rootfs-overlay drop-in like the `/health` CGI) so libzmq builds
   first and the daemon is cross-compiled with the target toolchain + sysroot.
 - **Autostart:** `/etc/init.d/S65zmqapi` (after `S50gpsd`, after networking). It binds
-  the hw-LAN IP and launches `/usr/bin/pluto_zmqd` via `start-stop-daemon`.
+  `0.0.0.0` (override `ZMQ_BIND`) and launches `/usr/bin/pluto_zmqd` via `start-stop-daemon`.
 - **Build it:** the standard base build picks it up automatically —
   `bash docker-run.sh` → `output/pluto.frm`. No Vivado needed (the `timing` block
   reads the counter via raw devmem; on a base/no-counter bitstream the `timing` block
@@ -171,8 +174,8 @@ ssh root@pluto.local 'pluto_zmqd --print'      # one JSON snapshot, no sockets b
 ### Test the live API on a running radio (no reflash)
 
 ```sh
-# on the Pluto (it ships with the firmware; or scp a freshly cross-built binary):
-ssh root@pluto.local 'pluto_zmqd --bind 0.0.0.0 &'   # TEST ONLY: all-ifaces bind
+# The shipped daemon already binds 0.0.0.0, so it's reachable as soon as it autostarts.
+# (To run a freshly cross-built binary by hand: stop the service first, then launch it.)
 
 # from the consumer (Python; pip install pyzmq):
 python3 - <<'PY'
@@ -187,8 +190,8 @@ print("PUB:", sub.recv_string())                  # ~1 Hz heartbeat
 PY
 ```
 
-> The `0.0.0.0` bind above is for ad-hoc testing only. The shipped init script binds
-> the hardware-LAN IP only (see [Security](#security)).
+> The shipped init script binds `0.0.0.0` by default; set `ZMQ_BIND=<ip>` to restrict
+> it to one interface (see [Security](#security)).
 
 ---
 

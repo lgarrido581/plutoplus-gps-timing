@@ -21,9 +21,10 @@
 //   rf     -- ad9361-phy sysfs (rx/tx LO, sample rate, bandwidth, gain, gain mode)
 //   dma    -- best-effort: scan the kernel log ring for cf_axi DMA error signatures
 //
-// Bound to the HARDWARE-LAN IP only by the init script (never the tailnet -- GPS
-// position is sensitive). Build: cross-compiled C++ (buildroot package pluto-zmqd,
-// links libzmq). Debug a running radio without a ZMQ client:  pluto_zmqd --print
+// Binds all interfaces (0.0.0.0) by default via the init script (the LAN subnet is not
+// knowable in advance); set ZMQ_BIND to restrict it. Read-only telemetry on local
+// links only; the Pluto is not on the tailnet by design. Build: cross-compiled C++
+// (buildroot package pluto-zmqd, links libzmq). Debug a radio:  pluto_zmqd --print
 //
 // SPDX-License-Identifier: MIT
 #include <zmq.h>
@@ -395,7 +396,7 @@ static void rf_init() {
     }
 }
 
-// Emit one attribute: as a JSON number if it parses as one, else as a JSON string.
+// Emit a string-valued attribute (e.g. gain_control_mode) as a JSON string.
 static void rf_add(std::string& b, bool& first, const char* name, const char* attr) {
     if (g_phy_path.empty()) return;
     std::string v = read_file_trim(g_phy_path + "/" + attr);
@@ -403,16 +404,28 @@ static void rf_add(std::string& b, bool& first, const char* name, const char* at
     add_field(b, first, name, is_number(v) ? v : json_str(v));
 }
 
+// Emit a numeric attribute as a JSON number. Some IIO attributes carry a unit
+// suffix (e.g. hardwaregain reads "71.000000 dB"), so take the leading token and
+// emit it bare if numeric; otherwise fall back to the raw string (never silently drop).
+static void rf_add_num(std::string& b, bool& first, const char* name, const char* attr) {
+    if (g_phy_path.empty()) return;
+    std::string v = read_file_trim(g_phy_path + "/" + attr);
+    if (v.empty()) return;
+    size_t sp = v.find_first_of(" \t");
+    std::string tok = (sp == std::string::npos) ? v : v.substr(0, sp);
+    add_field(b, first, name, is_number(tok) ? tok : json_str(v));
+}
+
 static std::string rf_block() {
     if (g_phy_path.empty()) rf_init();  // retry (iio may appear after boot)
     std::string b = "{";
     bool first = true;
     add_field(b, first, "phy", g_phy_path.empty() ? "" : json_str("ad9361-phy"));
-    rf_add(b, first, "rx_lo_hz", "out_altvoltage0_RX_LO_frequency");
-    rf_add(b, first, "tx_lo_hz", "out_altvoltage1_TX_LO_frequency");
-    rf_add(b, first, "sample_rate_hz", "in_voltage_sampling_frequency");
-    rf_add(b, first, "rf_bandwidth_hz", "in_voltage_rf_bandwidth");
-    rf_add(b, first, "rx_gain_db", "in_voltage0_hardwaregain");
+    rf_add_num(b, first, "rx_lo_hz", "out_altvoltage0_RX_LO_frequency");
+    rf_add_num(b, first, "tx_lo_hz", "out_altvoltage1_TX_LO_frequency");
+    rf_add_num(b, first, "sample_rate_hz", "in_voltage_sampling_frequency");
+    rf_add_num(b, first, "rf_bandwidth_hz", "in_voltage_rf_bandwidth");
+    rf_add_num(b, first, "rx_gain_db", "in_voltage0_hardwaregain");
     rf_add(b, first, "gain_control_mode", "in_voltage0_gain_control_mode");
     rf_add(b, first, "rf_port_select", "in_voltage0_rf_port_select");
     b += "}";
