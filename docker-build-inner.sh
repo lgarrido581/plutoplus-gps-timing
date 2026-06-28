@@ -279,6 +279,69 @@ if [ -n "$BR_CFG" ]; then
     info "  buildroot: gpsd->/dev/ttyPS0, chrony+pps-tools, getty removed, overlay set"
 fi
 
+# ZMQ telemetry API (pluto-zmqd): read-only timing/gps/rf/dma over ZMQ (PUB :5560 +
+# REP :5561), bound to the hardware-LAN IP. Lets a consumer (DSN) read pps/xo + GPS +
+# RF + DMA health WITHOUT root SSH/devmem. It is a small cross-compiled C++ daemon
+# linking libzmq, packaged as a buildroot package so (a) libzmq is built first and
+# (b) the target toolchain + sysroot are used -- which is why it is NOT done as a
+# rootfs-overlay drop-in like the shell-only /health CGI. services/ is mounted at
+# /build/services-src by docker-run.sh. See docs/PLUTO_ZMQ_API.md.
+if [ -n "$BR_CFG" ] && [ -f /build/services-src/pluto_zmqd.cpp ]; then
+    PKG=buildroot/package/pluto-zmqd
+    mkdir -p "$PKG"
+    cp /build/services-src/pluto_zmqd.cpp "$PKG/pluto_zmqd.cpp"
+    cp /build/services-src/S65zmqapi      "$PKG/S65zmqapi"
+    cat > "$PKG/Config.in" << 'EOF'
+config BR2_PACKAGE_PLUTO_ZMQD
+	bool "pluto-zmqd"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_ZEROMQ
+	help
+	  Read-only ZMQ telemetry daemon (timing/gps/rf/dma) for the
+	  Pluto+ GPS-timing firmware. PUB 1 Hz snapshot + REP op reads,
+	  bound to the hardware-LAN IP. See docs/PLUTO_ZMQ_API.md.
+EOF
+    cat > "$PKG/pluto-zmqd.mk" << 'EOF'
+################################################################################
+# pluto-zmqd -- read-only ZMQ telemetry daemon (in-tree local source)
+################################################################################
+PLUTO_ZMQD_VERSION = 1.0
+PLUTO_ZMQD_SITE = $(TOPDIR)/package/pluto-zmqd
+PLUTO_ZMQD_SITE_METHOD = local
+PLUTO_ZMQD_DEPENDENCIES = zeromq
+PLUTO_ZMQD_LICENSE = MIT
+
+define PLUTO_ZMQD_BUILD_CMDS
+	$(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++11 -O2 -pthread \
+		-o $(@D)/pluto_zmqd $(@D)/pluto_zmqd.cpp -lzmq
+endef
+
+define PLUTO_ZMQD_INSTALL_TARGET_CMDS
+	$(INSTALL) -D -m 0755 $(@D)/pluto_zmqd $(TARGET_DIR)/usr/bin/pluto_zmqd
+	$(INSTALL) -D -m 0755 $(@D)/S65zmqapi  $(TARGET_DIR)/etc/init.d/S65zmqapi
+endef
+
+$(eval $(generic-package))
+EOF
+    # Register the package so its Kconfig symbol exists (otherwise the defconfig line
+    # below is silently dropped as "unknown"). package/Config.in is sourced wholesale
+    # inside the "Target packages" menu, so appending keeps it in-menu. Idempotent.
+    if ! grep -q 'package/pluto-zmqd/Config.in' buildroot/package/Config.in; then
+        echo 'source "package/pluto-zmqd/Config.in"' >> buildroot/package/Config.in
+    fi
+    # C++ daemon linking libzmq -> need libstdc++ on target + the zeromq package
+    # (buildroot 2023.02 names the libzmq package "zeromq", symbol BR2_PACKAGE_ZEROMQ).
+    sed -i '/^BR2_PACKAGE_ZMQ=/d' "$BR_CFG"   # scrub a stale name from earlier runs
+    set_kcfg "$BR_CFG" BR2_INSTALL_LIBSTDCPP  'BR2_INSTALL_LIBSTDCPP=y'
+    set_kcfg "$BR_CFG" BR2_PACKAGE_ZEROMQ     'BR2_PACKAGE_ZEROMQ=y'
+    set_kcfg "$BR_CFG" BR2_PACKAGE_PLUTO_ZMQD 'BR2_PACKAGE_PLUTO_ZMQD=y'
+    # Force a recompile so daemon source edits actually ship (the local SITE re-rsyncs
+    # each build, but the build stamp would otherwise skip recompiling).
+    rm -rf buildroot/output/build/pluto-zmqd-* 2>/dev/null || true
+    info "  buildroot: pluto-zmqd package created + libzmq enabled (ZMQ telemetry API)"
+fi
+
 # Rootfs overlay (dedicated dir, wired via BR2_ROOTFS_OVERLAY above).
 # chrony.conf: GPS coarse time via gpsd shared memory + precise PPS via /dev/pps0.
 GPS_OVL="buildroot/board/pluto/gps-overlay"

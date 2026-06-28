@@ -1,0 +1,37 @@
+#!/bin/sh
+# S65zmqapi - read-only ZMQ telemetry API (timing/gps/rf/dma) via pluto_zmqd.
+#
+# Binds ALL interfaces (0.0.0.0) by default -- the Pluto's LAN subnet is not knowable
+# in advance (DHCP/site-dependent), so a hardcoded subnet is fragile. The data is
+# READ-ONLY and the Pluto's interfaces are local (wired LAN + USB gadget); the box is
+# not placed on the tailnet by design, so this exposes telemetry only on those local
+# links. To restrict it to one address, set ZMQ_BIND to a specific IP (e.g. in
+# /etc/default or the environment). For untrusted networks, add CurveZMQ + coarsen GPS.
+#
+# Starts after gpsd (S50) so the daemon's gpsd client connects immediately, and after
+# networking. PUB :5560 (1 Hz snapshot) + REP :5561 (op reads). See docs/PLUTO_ZMQ_API.md.
+DAEMON=/usr/bin/pluto_zmqd
+PIDFILE=/var/run/pluto_zmqd.pid
+BIND="${ZMQ_BIND:-0.0.0.0}"
+PUB_PORT="${ZMQ_PUB_PORT:-5560}"
+REP_PORT="${ZMQ_REP_PORT:-5561}"
+
+start() {
+	printf "Starting pluto_zmqd on %s (PUB %s / REP %s): " "$BIND" "$PUB_PORT" "$REP_PORT"
+	# -b: background the foreground daemon; -m: write the pidfile for stop().
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
+		--bind "$BIND" --pub-port "$PUB_PORT" --rep-port "$REP_PORT" \
+		&& echo "OK" || echo "Failed"
+}
+stop() {
+	printf "Stopping pluto_zmqd: "
+	start-stop-daemon -K -q -p "$PIDFILE" && echo "OK" || echo "Failed"
+	rm -f "$PIDFILE"
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0
