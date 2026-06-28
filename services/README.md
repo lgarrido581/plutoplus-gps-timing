@@ -5,16 +5,24 @@ Pluto's timing / GPS / RF / DMA state **without root SSH or `devmem`**.
 
 | file | role |
 |---|---|
-| `pluto_zmqd.cpp` | the **ZMQ telemetry daemon** — aggregates `pps_counter` (devmem mmap) + `xocorrect.log` (`xo_ppm`) + `gpsd` (persistent client) + `ad9361-phy` sysfs (`rf`) + kernel-log scan (`dma`) into JSON, served over **PUB :5560** (1 Hz snapshot) and **REP :5561** (op reads). Read-only by construction. Contract: [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md). |
+| `pluto_zmqd.cpp` | the **ZMQ telemetry daemon** (read-only) — aggregates `pps_counter` (devmem mmap) + `xocorrect.log` (`xo_ppm`) + `gpsd` (persistent client) + `ad9361-phy` sysfs (`rf`) + kernel-log scan (`dma`) into JSON, served over **PUB :5560** (1 Hz snapshot) and **REP :5561** (op reads). Contract: [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md). |
 | `S65zmqapi` | init script: launches `pluto_zmqd` bound to **all interfaces** (`0.0.0.0`; override `ZMQ_BIND=<ip>`), after `gpsd` + networking. |
+| `pluto_ctld.cpp` | the **ZMQ capture-control daemon** (WRITE) — tunes the AD9361 and runs a PPS-gated, GPS-anchored IQ capture, returning a SigMF (meta + `ci16_le` IQ) pair over **REP :5562** (`ping`/`capture`). Contract: [`docs/PLUTO_ZMQ_CTL_ICD.md`](../docs/PLUTO_ZMQ_CTL_ICD.md). |
+| `capture_core.c` / `.h` | the capture core called by `pluto_ctld` — a refactor of the validated DSN/sdr-stack `iq_capture.c` (tune + `axi_tdd` PPS-gated arm + single-DMA refill + `pps_counter` anchor), returning meta + IQ **in memory**. |
+| `pps_timestamp.c` / `.h` | GPS anchor from the FPGA `pps_counter` (LATCH/PPS regs). Vendored verbatim from DSN/sdr-stack. |
+| `S66ctld` | init script: launches `pluto_ctld` (REP :5562, `ZMQ_BIND`/`ZMQ_CTL_PORT` overrides), after `S65zmqapi`. |
 
 ## How it's built
 
-`pluto_zmqd` links **libzmq**, so unlike a shell CGI it can't just be dropped into the
-rootfs overlay — it must be cross-compiled. `docker-build-inner.sh` turns these files
-into a **buildroot package** (`buildroot/package/pluto-zmqd`, `select`s
-`BR2_PACKAGE_ZEROMQ`) so libzmq builds first and the target toolchain/sysroot are used.
-The package installs `pluto_zmqd → /usr/bin` and `S65zmqapi → /etc/init.d`.
+These daemons link **libzmq** (and `pluto_ctld` also **libiio**), so unlike a shell CGI
+they can't just be dropped into the rootfs overlay — they must be cross-compiled.
+`docker-build-inner.sh` turns these files into two **buildroot packages**:
+`pluto-zmqd` (`select`s `BR2_PACKAGE_ZEROMQ`) and `pluto-ctld` (`select`s
+`BR2_PACKAGE_ZEROMQ` + `BR2_PACKAGE_LIBIIO`), so the libraries build first and the
+target toolchain/sysroot are used. They install `pluto_zmqd`/`pluto_ctld` → `/usr/bin`
+and `S65zmqapi`/`S66ctld` → `/etc/init.d`. Building `pluto_ctld` inside buildroot uses
+the Pluto's own toolchain, sidestepping the glibc-≤2.25 cross-build the standalone
+`iq_capture` needs.
 
 `services/` is mounted at `/build/services-src` by `docker-run.sh`. A normal base build
 picks it up automatically:
