@@ -1,0 +1,34 @@
+#!/bin/sh
+# S66ctld - GPS-anchored capture-control API (ZMQ REP :5562) via pluto_ctld.
+#
+# The WRITE counterpart to S65zmqapi's read-only telemetry: it tunes the AD9361 and
+# performs PPS-gated GPS-anchored IQ captures (SigMF meta + ci16_le IQ). Binds all
+# interfaces by default (the LAN subnet isn't knowable in advance); set ZMQ_BIND to
+# restrict it. This is a WRITE interface -- keep it on the trusted private LAN only;
+# for a shared network add CurveZMQ first (a /2 revision). See docs/PLUTO_ZMQ_CTL_ICD.md.
+#
+# Starts after S65zmqapi (telemetry) and after gpsd/networking. One capture at a time
+# (REP serializes); a capture blocks until its (optionally PPS-gated) buffer fills.
+DAEMON=/usr/bin/pluto_ctld
+PIDFILE=/var/run/pluto_ctld.pid
+BIND="${ZMQ_BIND:-0.0.0.0}"
+PORT="${ZMQ_CTL_PORT:-5562}"
+
+start() {
+	printf "Starting pluto_ctld on %s (REP %s): " "$BIND" "$PORT"
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
+		--bind "$BIND" --port "$PORT" \
+		&& echo "OK" || echo "Failed"
+}
+stop() {
+	printf "Stopping pluto_ctld: "
+	start-stop-daemon -K -q -p "$PIDFILE" && echo "OK" || echo "Failed"
+	rm -f "$PIDFILE"
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0
