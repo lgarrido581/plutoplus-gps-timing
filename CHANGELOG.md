@@ -15,6 +15,17 @@ All notable changes to this project. Versions are git tags.
   fallback), returning meta + IQ **in memory** (no files). Adds: `core:frequency` = the AD9361 LO
   **read back** (catches the silent clamp), a **`t0_gps`** wait so all nodes grab the same PPS edge,
   and the **§7 rate cap** (refuse rates whose `l_clk = n_active_rx × rate` would wedge the DMA).
+- **Coexistence hardening (`xo_correct.sh` + `pluto_ctld.cpp`):** writing `xo_correction`
+  re-derives the AD9361 clocks and resets the sample rate — harmless when idle, but a rate
+  change *mid-DMA* wedges an in-flight capture (`errno-110`). `pluto_ctld` now drops
+  `/tmp/pluto_ctld.capturing` around `capture_run()`, and `xo_correct.sh` skips its correction
+  while that lock is fresh (`find -mmin -2` ignores a stale lock from a crashed daemon; `/tmp`
+  is tmpfs so it clears on reboot). GPS discipline resumes between captures. The ICD gains a
+  **§7a "one radio owner"** section: only `pluto_ctld` may drive the chip — running a second
+  host-side libiio capture path (the deprecated network-backend arming) concurrently wedges the
+  DMA (a hardware limitation, reboot to clear), so pick one path. Hardware-verified: with the
+  radio to itself, **13/13** back-to-back captures (10 `tdd_sync` + 4 free-run interleaved) ran
+  clean; the wedge only appeared when a second process was driving the radio in parallel.
 - **Integer-second fix (off-by-one):** in `tdd_sync` + `t0_gps` captures the anchor's **integer
   second** is now taken from the agreed schedule (`floor(t0_gps)`) rather than the OS clock, keeping
   the unambiguous hardware **sub-second** from `pps_counter`. chrony can lock a whole second off (gpsd

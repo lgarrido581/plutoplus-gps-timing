@@ -18,6 +18,7 @@
 // SPDX-License-Identifier: MIT
 #include <zmq.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
@@ -128,6 +129,25 @@ static void send_ping(void *sock) {
 
 // ---- capture dispatch ------------------------------------------------------
 
+// Coexistence lock with xo_correct.sh. While a capture holds the AD9361, the
+// xo discipline daemon must NOT write `xo_correction` -- that re-derives the chip
+// clocks and snaps the sample rate back to the default, which would reconfigure the
+// data path under an in-flight DMA and wedge the capture (errno-110). pluto_ctld
+// drops this file for the duration of capture_run(); xo_correct.sh skips its
+// correction while a FRESH lock is present (it ignores a stale one via find -mmin,
+// so a crashed daemon can't block discipline forever -- and /tmp is tmpfs, cleared
+// on reboot). Best-effort: a missing file just means no extra protection.
+static const char *CAP_LOCK_PATH = "/tmp/pluto_ctld.capturing";
+static void cap_lock_acquire(void) {
+    int fd = open(CAP_LOCK_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return;
+    char b[16];
+    int n = snprintf(b, sizeof b, "%ld\n", (long)getpid());
+    if (n > 0) { ssize_t w = write(fd, b, (size_t)n); (void)w; }
+    close(fd);
+}
+static void cap_lock_release(void) { unlink(CAP_LOCK_PATH); }
+
 static void handle_capture(void *sock, const std::string &body) {
     capture_req_t req;
     memset(&req, 0, sizeof req);
@@ -155,7 +175,9 @@ static void handle_capture(void *sock, const std::string &body) {
     }
 
     capture_result_t res;
+    cap_lock_acquire();              /* pause xo_correct's rate-disturbing write */
     int rc = capture_run(&req, &res);
+    cap_lock_release();
     if (rc != 0) {
         send_error(sock, res.err[0] ? res.err : "capture failed");
         return;

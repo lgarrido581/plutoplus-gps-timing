@@ -151,6 +151,26 @@ a DMA/refill fault; a malformed/unknown request. The reply is always exactly one
   transfer`. The client's default timeout is 30 s, so a near-future `t0_gps` is fine.
   One capture at a time (REP serializes).
 
+## 7a. Coexistence — one radio owner
+
+The AD9361 is a single shared resource. **`pluto_ctld` must be the *only* thing driving
+the radio.** Two concurrent owners of the chip will wedge the RX DMA (`errno-110`, "window
+missed / DMA error" on every subsequent capture until reboot) — this is a hardware
+limitation, not a daemon bug, and it cannot be papered over server-side.
+
+- **Do NOT also run a host-side libiio capture path** (e.g. the deprecated
+  `TddPlutoCaptureSource` that arms `sync_start_enable` / reprograms `axi_tdd` over the
+  *network* libiio backend). Pick one path: the `:5562` offload API **or** host-side
+  libiio — never both at once. Running both is the classic way to wedge the DMA.
+- **`xo_correct.sh` is made capture-safe.** Writing `xo_correction` re-derives the chip
+  clocks and resets the sample rate (a rate change mid-DMA wedges the capture). While a
+  capture is in flight `pluto_ctld` drops `/tmp/pluto_ctld.capturing`; `xo_correct.sh`
+  **skips its correction** while that lock is fresh (stale locks > 2 min are ignored, and
+  `/tmp` is tmpfs so it clears on reboot — a crashed daemon cannot stall discipline). GPS
+  discipline simply resumes between captures.
+- A wedge, if one is provoked anyway, **requires a reboot** (`ssh root@<pluto> reboot`) —
+  a power-cycle is not needed, and disabling the `axi_tdd` core does not clear it.
+
 ## 8. Security
 
 A **WRITE** interface (tunes + captures). On the trusted private hardware LAN, no auth
