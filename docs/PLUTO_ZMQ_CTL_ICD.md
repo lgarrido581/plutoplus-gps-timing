@@ -92,11 +92,30 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   capture, else a frame-grid snap (`"tdd_pps_window"`), else the free-running anchor
   (`"live_count_at_refill"`). Epoch is the PPS-disciplined `CLOCK_REALTIME` — consistent
   on every node, which is all DSN's cross-node differencing needs.
+- **Integer-second anchoring (`tdd_sync` + `t0_gps`).** The hardware sub-second
+  (`pps_counter` phase within the second) is unambiguous, but the *integer* second comes
+  from the OS clock, which chrony can lock a whole second off (gpsd pinning an NMEA epoch
+  to the wrong PPS pulse at 9600 baud — phase-perfect, second wrong). Because `tdd_sync`
+  gates sample 0 on the **first PPS at/after the arm point** (`t0_gps − 0.35 s` arm lead),
+  sample 0's true integer second is the **scheduled PPS edge** — `ceil(t0_gps − 0.35)`,
+  which for a well-formed integer `t0_gps` (a real PPS edge) is just `t0_gps`, and stays
+  correct if `t0_gps` carries a fractional part. The server sets
+  `gps_ns0 = scheduled_edge·1e9 + HW_sub_second` and reports the source in
+  **`captures[0]["gpsanchor:second_source"]`** (`"t0_gps"` when rebased, else
+  `"os_clock"`). **Send an integer (PPS-edge) `t0_gps`** for the cleanest contract. If the
+  OS clock disagreed with the scheduled edge by ≥1 s, that delta is reported in
+  **`captures[0]["gpsanchor:coarse_skew_s"]`** (integer s, signed) and the capture is
+  flagged `timing:health.degraded = true` — **a non-zero skew means the arm may have gated
+  the wrong physical edge, so the consumer should drop the capture** rather than trust the
+  relabeled anchor. (The Level-2 gpsd/chrony hardening prevents the wrong lock in the first
+  place.)
 - **`captures[0]["core:frequency"]`** (number, Hz) — the **AD9361 LO read back**, not
   the requested `freq_hz` (the chip silently clamps an out-of-range LO); DSN trusts this.
 - `global["timing:health"]` = `{ pps_present (bool), degraded (bool), xo_ppm (number),
-  latch_rms_ns (number) }`. Also emitted: `gpsanchor:cnt_clk_hz`, `:pps_seq`,
-  `:pps_count`, `:sample_index0`, `:method`, `core:datetime`, `core:sample_start`.
+  latch_rms_ns (number) }`. `degraded` is true if PPS is absent **or** a coarse-second
+  skew was detected (above). Also emitted: `gpsanchor:cnt_clk_hz`, `:pps_seq`,
+  `:pps_count`, `:sample_index0`, `:method`, `:second_source`, `:coarse_skew_s`,
+  `core:datetime`, `core:sample_start`.
 
 ### Frame 1 — IQ payload (raw bytes)
 
