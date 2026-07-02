@@ -92,6 +92,18 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   capture, else a frame-grid snap (`"tdd_pps_window"`), else the free-running anchor
   (`"live_count_at_refill"`). Epoch is the PPS-disciplined `CLOCK_REALTIME` — consistent
   on every node, which is all DSN's cross-node differencing needs.
+  - ⚠️ **The `tdd_pps_latch` path needs a bitstream that actually contains the DMA-start
+    latch registers** (`LATCH_COUNT`/`LATCH_SEQ` at 0x3C/0x40, added in HDL commit
+    `d329bbc`, built via `--hwlatch`). The **prebuilt `v1.5` bitstream predates that commit**
+    (its `pps_counter` has a 6-bit address decode: reading 0x40 aliases back to the 0x00 ID
+    `0x50505343`, and 0x3C reads 0). On that image the latch can **never** fire, so every
+    capture uses `tdd_pps_window` — a frame-grid *assertion* that the window opened on a PPS
+    edge, not a measurement. To get true ±~16 ns `gps_ns0`, rebuild the bitstream from
+    `d329bbc`+ (`docker-run.sh --vivado <vivado-2023.2> --hwlatch`, which also re-drives
+    `axi_tdd/sync_in` from `pps_tick` so the frame re-anchors every PPS instead of free-
+    running). The firmware already reads the latch correctly — it just needs the register to
+    exist. Confirm on hardware with `devmem 0x7C460040 32`: a real latch counts up from a
+    small value; `0x50505343` means the latch isn't in the image.
 - **Integer-second anchoring (`tdd_sync` + `t0_gps`).** The hardware sub-second
   (`pps_counter` phase within the second) is unambiguous, but the *integer* second comes
   from the OS clock, which chrony can lock a whole second off (gpsd pinning an NMEA epoch
