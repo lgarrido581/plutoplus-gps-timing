@@ -46,6 +46,12 @@ set -u
 PHY=/sys/bus/iio/devices/iio:device0
 XO="$PHY/xo_correction"
 SRATE="$PHY/in_voltage_sampling_frequency"   # live RX sample rate (Hz); l_clk derives from it
+# pluto_ctld drops this while a capture holds the AD9361. Writing xo_correction then
+# re-derives the chip clocks and resets the sample rate -> wedges the in-flight DMA.
+# Skip the correction while a FRESH lock is present (find -mmin -2 => ignore a stale
+# one from a crashed daemon; /tmp is tmpfs so it also clears on reboot).
+CAP_LOCK="/tmp/pluto_ctld.capturing"
+capture_active() { [ -e "$CAP_LOCK" ] && [ -n "$(find "$CAP_LOCK" -mmin -2 2>/dev/null)" ]; }
 STATUS=0x7C460008
 DELTA=0x7C460014
 SEQ=0x7C460018
@@ -206,7 +212,12 @@ while :; do
     ppm=$(awk "BEGIN{printf \"%+.3f\", $err/($NOMINAL/1000000.0)}")
     last_delta=$d; last_ppm=$ppm
     xo=$(cat $XO)
-    if [ "$ae" -gt "$DEADBAND" ]; then
+    if [ "$ae" -gt "$DEADBAND" ] && capture_active; then
+        # A capture holds the AD9361. Writing xo_correction now resets the sample
+        # rate mid-DMA and wedges that capture. Hold this cycle; correct after.
+        [ "$last" != "caphold" ] && log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> capture active, holding correction"
+        last=caphold; holdc=0
+    elif [ "$ae" -gt "$DEADBAND" ]; then
         # plant slope is NEGATIVE (raising xo lowers delta), so to null err we
         # step xo the SAME sign as err: dxo = +err * (Hz per count).
         dxo=$(( err * HZ_PER_CNT_X100 / 100 ))    # Δxo Hz to null err

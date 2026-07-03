@@ -17,6 +17,16 @@ See [`pps_counter.v`](pps_counter.v) for the RTL + full register map.
 Frequency discipline averages out the µs IRQ jitter, so the **software-latch mode
 needs no extra FPGA pin** and is the recommended starting point.
 
+> **Separate feature — the DMA-start latch (`LATCH_COUNT`/`LATCH_SEQ`, 0x3C/0x40).**
+> Distinct from the `pps_in` latch above: `latch_trig` is fanned out from `axi_tdd
+> tdd_channel_1` (the RX-DMA sync) and captures the free-run counter at sample[0] of a
+> TDD-gated capture → sample-exact GPS timestamp (`tdd_pps_latch`, ±~16 ns). **Added in
+> commit `d329bbc` (ADDR_WIDTH 6→7).** The released **`v1.5` bitstream predates it**, so on
+> that image 0x40 aliases the 0x00 ID (`0x50505343`) and the latch never fires — captures
+> fall back to the software `tdd_pps_window` anchor. Build via `--hwlatch` to include it
+> (the BD tcl also re-drives `axi_tdd/sync_in` from `pps_tick`). Verify: `devmem 0x7C460040
+> 32` should count up, not read `0x50505343`.
+
 ## Integration into the Pluto HDL (ADI block design)
 
 **Automated** by `docker-build-inner.sh` (the `--vivado` build): it copies this

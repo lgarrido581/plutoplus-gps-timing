@@ -19,6 +19,11 @@
 #include <iio.h>
 
 #define LCLK_MAX_HZ 61440000.0   /* AD9361 interface data-clock ceiling (1R1T max rate) */
+#define ARM_LEAD_S  0.35         /* arm the RX DMA this long before t0 so it catches the
+                                  * t0 PPS edge. The capture therefore gates on the first
+                                  * PPS at/after (t0 - ARM_LEAD_S); used by BOTH the t0
+                                  * wait and the Level-1 integer-second anchor -- keep in
+                                  * sync (a single constant so they cannot drift). */
 
 static struct iio_device *g_tdd = NULL;
 
@@ -207,7 +212,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
         double now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
-        double wait = req->t0_gps - now_s - 0.35;   /* arm ~350 ms before the edge */
+        double wait = req->t0_gps - now_s - ARM_LEAD_S;   /* arm before the edge */
         if (wait > 0 && wait < 60.0) {
             struct timespec ts;
             ts.tv_sec = (time_t)wait;
@@ -290,6 +295,36 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         }
     }
 
+    /* --- Level 1: take the INTEGER second from the agreed shared schedule (t0_gps),
+     * not the local OS clock. chrony can lock the wrong integer second -- gpsd pins an
+     * NMEA epoch to the wrong PPS pulse at 9600 baud, so the clock is phase-perfect but
+     * a whole second off (stable for the lock session). The hardware sub-second
+     * (anchor.gps_ns % 1e9, from the PPS counter) is unambiguous; only the integer
+     * second is fragile. In tdd_sync the capture gates on the first PPS at/after the arm
+     * point (t0 - ARM_LEAD_S), so sample 0's true second is ceil(t0 - ARM_LEAD_S) -- for
+     * a well-formed integer t0 (a real PPS edge) that is just t0, but it stays correct if
+     * t0 carries a fractional part. Re-base to that + the HW sub-second. If the OS clock
+     * disagrees by >=1 s, log it and flag the capture degraded -- the consumer can drop it
+     * (a skew also means the arm may have gated the wrong PHYSICAL edge, which relabeling
+     * cannot fix; that is what the Level-2 gpsd/chrony hardening prevents). */
+    int coarse_skew_s = 0;
+    const char *second_src = "os_clock";
+    if (req->tdd_sync && req->have_t0) {
+        const uint64_t NS = 1000000000ULL;
+        uint64_t sub_ns  = anchor.gps_ns % NS;             /* HW phase within the second */
+        long long os_sec = (long long)(anchor.gps_ns / NS);
+        double gate = req->t0_gps - ARM_LEAD_S;            /* arm point; gate = next PPS >= this */
+        long long t0_sec = (long long)gate;                /* floor (gate is positive) ... */
+        if ((double)t0_sec < gate) t0_sec += 1;            /* ... -> ceil = the gated PPS second */
+        coarse_skew_s = (int)(os_sec - t0_sec);
+        anchor.gps_ns = (uint64_t)t0_sec * NS + sub_ns;    /* trusted second + HW sub-second */
+        second_src = "t0_gps";
+        if (coarse_skew_s != 0)
+            fprintf(stderr, "pluto_ctld: coarse-second skew %+d s (OS %lld vs gated t0 %lld) -- "
+                    "anchored to schedule, flagged degraded\n", coarse_skew_s, os_sec, t0_sec);
+    }
+    int degraded = (!anchor.present) || (coarse_skew_s != 0);
+
     /* --- build the SigMF metadata (in memory). core:frequency = read-back LO. */
     char dt[64]; iso8601_ns(anchor.gps_ns, dt, sizeof dt);
     double xo_ppm = ((double)anchor.cnt_hz - nominal_cnt) / nominal_cnt * 1e6;
@@ -331,15 +366,18 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"gpsanchor:method\": \"%s\",\n"
       "      \"gpsanchor:sample_index0\": %u,\n"
       "      \"gpsanchor:pps_count\": %u,\n"
-      "      \"gpsanchor:pps_seq\": %u\n"
+      "      \"gpsanchor:pps_seq\": %u,\n"
+      "      \"gpsanchor:second_source\": \"%s\",\n"
+      "      \"gpsanchor:coarse_skew_s\": %d\n"
       "    }\n"
       "  ],\n"
       "  \"annotations\": []\n"
       "}\n",
       req->rate_hz, node, posbuf,
-      anchor.present ? "true" : "false", xo_ppm, anchor.present ? "false" : "true",
+      anchor.present ? "true" : "false", xo_ppm, degraded ? "true" : "false",
       actual_lo, dt, (unsigned long long)anchor.gps_ns, anchor.cnt_hz,
-      method, anchor.live_count, anchor.pps_count, anchor.pps_seq);
+      method, anchor.live_count, anchor.pps_count, anchor.pps_seq,
+      second_src, coarse_skew_s);
 
     /* copy the IQ out of the iio buffer (freed below). */
     uint8_t *iqcopy = (uint8_t *)malloc(bytes ? bytes : 1);

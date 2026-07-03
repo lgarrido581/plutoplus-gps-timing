@@ -70,6 +70,22 @@ Priorities are ordered roughly by impact-for-effort.
   characterize the residual per node so it truly cancels.
 - **Common-view cross-validation.** Periodically compare two nodes' timing against
   a shared visible reference to catch a silently-bad GPS/timing node.
+- **Integer-second hardening at the source (off-by-one Level 2).** The capture-control
+  firmware already anchors a `tdd_sync` capture's integer second to `floor(t0_gps)` and
+  flags a whole-second skew (`gpsanchor:coarse_skew_s`, `degraded`) — but that *detects*
+  a wrong chrony lock, it doesn't *prevent* it. Root cause: at **9600 baud** the NMEA
+  sentence for second *N* finishes arriving well after second *N*'s PPS edge, so gpsd can
+  pair the timestamp to the wrong pulse and chrony locks a second off — phase-perfect,
+  integer-second wrong (and the RX arm may then gate the wrong physical edge, which no
+  relabeling fixes). Fix is two coordinated parts, **both needed together**: (1) raise the
+  **GPS UART to 115200** so NMEA lands inside its own second — but this is a hardware-
+  coordinated change, the GPS *module* must be reconfigured to 115200 in lockstep (NEO-6M
+  defaults to 9600; many clones have no backup battery and revert each boot, so it needs a
+  boot-time UBX-CFG re-config in `S50gpsd`, then `stty`/gpsd at 115200), and shipping the
+  baud flip alone **bricks GPS** on an un-reconfigured module; (2) **chrony hardening** —
+  tighten `maxdistance`/`maxjitter` and require PPS+NMEA agreement so a wrong-second lock
+  is rejected rather than disciplined to. Must be validated on a real GPS node before it
+  ships (it touches the validated stratum-1 path); do **not** merge the baud change blind.
 
 ## GPS-scheduled TX/RX & coordination
 
