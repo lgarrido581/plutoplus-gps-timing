@@ -27,44 +27,42 @@
 
 static struct iio_device *g_tdd = NULL;
 
-/* GPS-sequenced capture via the ADI axi_tdd core (no firmware change): the base BD
- * wires axi_tdd_0/tdd_channel_1 -> RX-DMA/sync (LEVEL: DMA transfers while HIGH) and
- * pps_tick -> axi_tdd/sync_in (GPS-anchors the frame). Program channel1 as a window
- * [on_raw, off_raw) per frame, sync_external=1 so the frame resets on the GPS PPS.
- * An armed RX buffer then starts when the window opens = a GPS-deterministic edge.
- * TDD raw counts are in sample-clock (fs) units. (Verbatim from iq_capture.c.) */
-static int configure_tdd(struct iio_context *ctx, long long frame_raw,
-                         long long on_raw, long long off_raw) {
+/* Coincident (PPS-anchored) capture. ADI's axi_tdd frame free-runs vs the GPS 1PPS -- it
+ * re-syncs sync_in only ONCE at enable, not per pulse -- so its window drifts and cannot
+ * align across nodes. The BD ORs axi_tdd/tdd_channel_1 with pps_counter/tdd_enable into
+ * the RX-DMA sync (LEVEL: DMA transfers while HIGH); pps_counter resets its frame to 0 on
+ * EVERY PPS edge. So for a gated capture we DISABLE axi_tdd -- which forces tdd_channel_1
+ * LOW (validated: disabling the core latches ch1 low) -- and let pps_counter own the OR
+ * via its PPS-anchored window (programmed by the caller with pps_ts_config_frame). The
+ * window then opens coincident across nodes. restore_rx_mode() re-opens axi_tdd for
+ * free-running streaming RX. TDD raw counts are in sample-clock (fs) units. */
+static int configure_tdd(struct iio_context *ctx) {
     g_tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
     if (!g_tdd) return -1;
-    struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
-    if (!ch1) return -2;
-    char b[32];
-    iio_device_attr_write(g_tdd, "enable", "0");
-    snprintf(b, sizeof b, "%lld", frame_raw); iio_device_attr_write(g_tdd, "frame_length_raw", b);
-    snprintf(b, sizeof b, "%lld", on_raw);     iio_channel_attr_write(ch1, "on_raw", b);
-    snprintf(b, sizeof b, "%lld", off_raw);    iio_channel_attr_write(ch1, "off_raw", b);
-    iio_channel_attr_write(ch1, "polarity", "0");
-    iio_channel_attr_write(ch1, "enable", "1");
-    iio_device_attr_write(g_tdd, "sync_external", "1");   /* GPS-anchor via pps_tick */
-    iio_device_attr_write(g_tdd, "enable", "1");
+    iio_device_attr_write(g_tdd, "enable", "0");   /* ch1 -> LOW: yield the RX-DMA OR to pps_counter */
     return 0;
 }
 
-/* Restore normal RX WITHOUT a reboot: do NOT disable the core (that latches channel1
- * LOW and starves the DMA). Instead set channel1 to a full-open window (always HIGH)
- * so the RX DMA captures freely again. Validated live. (Verbatim from iq_capture.c.) */
+/* Restore free-running streaming RX WITHOUT a reboot. A gated capture disabled axi_tdd (to
+ * yield the RX-DMA OR to pps_counter); re-enable it full-open (channel1 always HIGH) so the
+ * OR is HIGH again and the RX DMA captures freely, and drop pps_counter's window so only
+ * axi_tdd gates streaming. */
 static void restore_rx_mode(long long frame_len, long long rate) {
-    if (!g_tdd) return;
-    struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
-    char b[32];
-    if (ch1) {
-        iio_channel_attr_write(ch1, "on_raw", "0");
+    if (g_tdd) {
+        struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
+        char b[32];
         snprintf(b, sizeof b, "%lld", frame_len > 0 ? frame_len : rate);
-        iio_channel_attr_write(ch1, "off_raw", b);   /* off = frame_length -> always high */
-        iio_channel_attr_write(ch1, "enable", "1");
+        iio_device_attr_write(g_tdd, "enable", "0");
+        iio_device_attr_write(g_tdd, "frame_length_raw", b);
+        if (ch1) {
+            iio_channel_attr_write(ch1, "on_raw", "0");
+            iio_channel_attr_write(ch1, "off_raw", b);   /* off = frame_length -> always high */
+            iio_channel_attr_write(ch1, "polarity", "0");
+            iio_channel_attr_write(ch1, "enable", "1");
+        }
+        iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
     }
-    /* leave the core ENABLED (disabling it is what breaks RX) */
+    pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
 }
 
 /* ISO8601 UTC with ns, e.g. 2026-06-23T18:04:05.123456789Z */
@@ -171,15 +169,15 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     if (req->tdd_sync) {
         method = "tdd_pps_window";
         /* GUARD: arming the DMA without a window that WILL open wedges it (reboot to
-         * clear). Require a live GPS PPS so the sync_external frame actually runs. */
+         * clear). Require a live GPS PPS so pps_counter's PPS-anchored frame runs. */
         if (!(have_pps && pps_ts_present(&pps))) {
             if (have_pps) pps_ts_close(&pps);
             iio_context_destroy(ctx);
             return fail(out, "tdd_sync needs a live GPS PPS (would wedge the DMA)");
         }
         frame_len = req->rate_hz;  /* 1 s frame (divides the GPS second, covers a block) */
-        /* channel1 window [on_raw, off_raw): on_raw = offset_samples; off must cover the
-         * offset + whole capture + arm-latency margin and stay inside the frame. */
+        /* pps_counter window [rx_start, rx_stop): rx_start = offset_samples; rx_stop must
+         * cover the offset + whole capture + arm-latency margin and stay inside the frame. */
         off_raw = req->offset_samples + (long long)req->samples + (long long)(req->samples / 2);
         if (req->offset_samples < 0 || off_raw >= frame_len) {
             char m[160];
@@ -189,10 +187,21 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             iio_context_destroy(ctx);
             return fail(out, m);
         }
-        if (configure_tdd(ctx, frame_len, req->offset_samples, off_raw) != 0) {
+        if (configure_tdd(ctx) != 0) {
             pps_ts_close(&pps);
             iio_context_destroy(ctx);
-            return fail(out, "axi_tdd (iio-axi-tdd-0/channel1) config failed");
+            return fail(out, "axi_tdd (iio-axi-tdd-0) not found");
+        }
+        /* Program pps_counter's PPS-anchored RX window [offset, off_raw). cnt_clk == the
+         * AD936x sample clock (== l_clk), so these counts are the same sample units as the
+         * axi_tdd path. drive_pins makes tdd_enable output the window; the BD ORs it into
+         * the RX-DMA sync -> sample[0] lands on a GPS-locked edge, coincident across nodes. */
+        if (pps_ts_config_frame((uint32_t)frame_len, (uint32_t)req->offset_samples,
+                                (uint32_t)off_raw) != 0) {
+            restore_rx_mode(frame_len, req->rate_hz);
+            pps_ts_close(&pps);
+            iio_context_destroy(ctx);
+            return fail(out, "pps_counter frame config failed (/dev/mem)");
         }
         iio_context_set_timeout(ctx, 4000);   /* a missed window errors, not hangs */
         if (iio_device_attr_write(rx, "sync_start_enable", "arm") < 0) {

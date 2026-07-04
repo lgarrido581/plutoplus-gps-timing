@@ -93,7 +93,10 @@ static int frame_write(uint32_t ctrl, uint32_t flen, uint32_t rxa, uint32_t rxo)
 }
 
 int pps_ts_config_frame(uint32_t frame_len, uint32_t rx_start, uint32_t rx_stop) {
-    return frame_write(0x3, frame_len, rx_start, rx_stop);  /* enable|pps_sync_en */
+    /* enable|pps_sync_en|drive_pins: drive_pins (bit2) is REQUIRED for tdd_enable to
+     * output the RX-window level; the BD ORs tdd_enable into the RX-DMA sync, so without
+     * it the window never opens. pps_sync_en resets the frame on each PPS -> GPS-locked. */
+    return frame_write(0x7, frame_len, rx_start, rx_stop);
 }
 
 int pps_ts_disable_frame(void) {
