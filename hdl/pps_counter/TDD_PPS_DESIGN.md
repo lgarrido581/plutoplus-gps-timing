@@ -83,6 +83,32 @@ ADI `hdl` tree.
   residual leaves a 1-sample runt frame, which is harmless.
 - Ships **disabled** (powers up identical to v1.3) until software configures `axi_tdd` + enables sync.
 
+## As built (coincident capture — supersedes v1.4 Method A)
+
+Live register diagnostics on a running node showed Method A does **not** hold: with
+`pps_tick → axi_tdd/sync_in` wired, `axi_tdd` armed for external sync (`CONTROL=0x9`), an exactly
+1-second frame, and `pps_tick` pulsing every second, the `axi_tdd` window still drifted milliseconds
+and *accumulated*. **ADI's `axi_tdd` re-syncs on `sync_in` only once (at enable), then free-runs on the
+sample clock** — it does not re-anchor on each pulse. So its frame phase drifts vs the GPS second by
+the residual `l_clk`-vs-PPS error and nodes do not agree on window phase.
+
+The fix uses **Method B** (`drive_pins`) for the RX gate, because `pps_counter`'s own frame *does*
+reload to 0 on **every** PPS edge (`pps_rise`), so its `tdd_enable` window is GPS-locked by
+construction. To keep free-running streaming RX working, the RX-DMA `sync` becomes the **OR** of both:
+
+```
+adc_dma/sync = axi_tdd/tdd_channel_1  |  pps_counter/tdd_enable
+```
+
+- **Streaming RX:** `axi_tdd` open (full-frame window, always HIGH) dominates the OR → RX free-runs.
+  Boot-safe: needs no `pps_counter` config (it powers up inert with `tdd_enable = 0`).
+- **GPS-gated capture:** software disables `axi_tdd` (which latches `tdd_channel_1` LOW) and programs
+  `pps_counter`'s window (`TDD_CTRL = enable|pps_sync_en|drive_pins`, plus `FRAME_LEN`/`RX_START`/
+  `RX_STOP`). The OR then passes `tdd_enable` — a PPS-anchored window — so `sample[0]` lands on a common
+  GPS edge across nodes. The DMA-start latch observes the OR output, so `LATCH_COUNT` stays sample-exact.
+- Drive `tdd_enable` only as a **level** (an RX window). Driving the RX-DMA sync from a 1-cycle pulse
+  (`tdd_sync`) starves the DMA and breaks RX.
+
 ## Testing
 
 - **Functional (no scope) — [`tdd_verify.sh`](tdd_verify.sh):** confirms the sample clock is locked,
@@ -101,9 +127,10 @@ ADI `hdl` tree.
 
 A brief PPS dropout does **not** break triggering:
 
-- `axi_tdd` **free-runs** between sync pulses — `pps_tick` *re-aligns* its frame counter, it does not
-  gate it. Same for `pps_counter`'s own frame counter (`frame_wrap` keeps it running; the PPS edge only
-  *reloads* it). So frames/bursts keep coming during a gap.
+- `pps_counter`'s own frame counter **free-runs** between PPS edges (`frame_wrap` keeps it running) and
+  the PPS edge only *reloads* it to 0 — so frames/bursts keep coming during a gap and re-anchor when PPS
+  returns. (ADI's `axi_tdd` frame does **not** re-align on `pps_tick` — see "As built (coincident
+  capture)"; that is why the coincident-capture RX gate is driven from `pps_counter`, not `axi_tdd`.)
 - The only effect is loss of re-anchoring: frame phase drifts vs absolute GPS by
   `residual_ppm × gap` (~30 ns per second of gap at the ~0.03 ppm hold). The next PPS snaps it back.
 - The sample clock holds its last `xo_correction` (TCXO runs at the last-disciplined frequency);

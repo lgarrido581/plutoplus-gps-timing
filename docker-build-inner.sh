@@ -682,47 +682,50 @@ regen(pdir + "/system_bd.tcl",
       "ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn\n"
       + pps_conn + gpio_conn +
       "ad_cpu_interconnect 0x7C460000 pps_counter_0\n"
-      # GPS-anchor TDD: re-drive ADI axi_tdd_0/sync_in (was tied to the external
-      # tdd_ext_sync port) from pps_counter's PPS-edge pulse. Same l_clk domain, so
-      # axi_tdd's frame counter resets on each GPS PPS -> TX/RX windows align across
-      # nodes. Harmless on the software-latch build (pps_tick stays 0 -> tdd freeruns).
+      # Coincident capture: gate the RX-DMA on a PPS-anchored window. ADI's axi_tdd
+      # re-syncs its frame only ONCE at enable (not on each sync_in pulse), so its
+      # window free-runs vs the GPS 1PPS. pps_counter resets its frame to 0 on EVERY
+      # PPS edge, so its tdd_enable window is PPS-locked. Keep axi_tdd as the streaming
+      # RX gate (default full-open, boot-safe) and OR pps_counter's window into the
+      # RX-DMA sync:  adc_dma/sync = axi_tdd/tdd_channel_1 | pps_counter/tdd_enable.
+      # Streaming RX is unchanged (axi_tdd open dominates the OR). For a gated capture
+      # the host disables axi_tdd (channel_1 -> LOW) and drives pps_counter's window,
+      # so the OR passes the PPS-anchored edge -> windows align across nodes.
+      # (pps_tick still re-drives sync_in; irrelevant now but harmless.)
       "if {[llength [get_bd_cells -quiet axi_tdd_0]]} {\n"
       "  set _tnet [get_bd_nets -quiet -of_objects [get_bd_pins axi_tdd_0/sync_in]]\n"
       "  if {$_tnet ne {}} {disconnect_bd_net $_tnet [get_bd_pins axi_tdd_0/sync_in]}\n"
       "  ad_connect pps_counter_0/pps_tick axi_tdd_0/sync_in\n"
-      # DMA-start GPS latch: FAN OUT tdd_channel_1 (= the RX-DMA sync, the
-      # transfer-start level) to pps_counter_0/latch_trig. This ONLY ADDS a load on
-      # the existing tdd_channel_1 net (no disconnect) -> normal RX is untouched and
-      # the DMA is never gated by us. On a TDD-gated capture, the channel-1 rising
-      # edge latches the free-run counter -> LATCH_COUNT (0x3C) = the exact cnt_clk
-      # count of sample[0], with no host read race. Defensive about pin names.
       "  if {[llength [get_bd_pins -quiet axi_tdd_0/tdd_channel_1]] && "
-      "      [llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
-      # FAN-OUT done right: ADD latch_trig to the EXISTING tdd_channel_1 net (the
-      # one already driving adc_dma/sync). Using ad_connect here instead created a
-      # NEW net and ORPHANED adc_dma/sync -> broke all RX. connect_bd_net -net adds
-      # a sink without disturbing the existing connection.
-      "    set _cnet [get_bd_nets -quiet -of_objects [get_bd_pins axi_tdd_0/tdd_channel_1]]\n"
-      "    if {$_cnet ne {}} {\n"
-      "      connect_bd_net -net $_cnet [get_bd_pins pps_counter_0/latch_trig]\n"
-      "      puts \"pps_counter: latch_trig added to tdd_channel_1 net $_cnet (DMA-start latch)\"\n"
-      "    } else {\n"
-      "      ad_connect axi_tdd_0/tdd_channel_1 pps_counter_0/latch_trig\n"
-      "      puts \"pps_counter: latch_trig <- tdd_channel_1 (no existing net; direct)\"\n"
+      "      [llength [get_bd_pins -quiet pps_counter_0/tdd_enable]]} {\n"
+      # Insert a 2-input OR; move adc_dma/sync from tdd_channel_1 onto OR/Res.
+      "    ad_ip_instance util_vector_logic dma_sync_or [list C_OPERATION {or} C_SIZE 1]\n"
+      "    set _snet [get_bd_nets -quiet -of_objects [get_bd_pins axi_ad9361_adc_dma/sync]]\n"
+      "    if {$_snet ne {}} {disconnect_bd_net $_snet [get_bd_pins axi_ad9361_adc_dma/sync]}\n"
+      "    ad_connect axi_tdd_0/tdd_channel_1  dma_sync_or/Op1\n"
+      "    ad_connect pps_counter_0/tdd_enable dma_sync_or/Op2\n"
+      "    ad_connect dma_sync_or/Res          axi_ad9361_adc_dma/sync\n"
+      # The DMA-start latch observes the REAL gate edge (the OR output) so LATCH_COUNT
+      # (0x3C) = the exact cnt_clk count of sample[0] whichever source opened the window.
+      "    if {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
+      "      ad_connect dma_sync_or/Res pps_counter_0/latch_trig\n"
       "    }\n"
+      "    puts \"pps_counter: RX-DMA sync = tdd_channel_1 OR tdd_enable (PPS-anchored capture)\"\n"
       "  } elseif {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {\n"
       "    ad_connect GND pps_counter_0/latch_trig\n"
-      "    puts \"pps_counter: WARN no tdd_channel_1; latch_trig tied 0\"\n"
+      "    puts \"pps_counter: WARN no tdd_channel_1/tdd_enable; latch_trig tied 0\"\n"
       "  }\n"
       "} else {\n"
       "  if {[llength [get_bd_pins -quiet pps_counter_0/latch_trig]]} {ad_connect GND pps_counter_0/latch_trig}\n"
       "}\n")
-      # NOTE: GPS-sequenced RX *gating* still needs NO BD change -- the base Pluto BD
-      # already wires axi_tdd_0/tdd_channel_1 -> axi_ad9361_adc_dma/sync (a LEVEL:
-      # the RX DMA transfers while sync is HIGH); sequencing is host-side (program
-      # axi_tdd channel-1 + arm the DMA). The latch above only OBSERVES that net.
-      # (An earlier attempt DROVE tdd_channel_1 from pps_counter/tdd_sync -- a 1-cyc
-      #  PULSE -- which starved the DMA and broke all RX. That was reverted.)
+      # NOTE: the RX-DMA sync (axi_ad9361_adc_dma/sync) is a LEVEL -- the DMA transfers
+      # while HIGH. The base Pluto BD drove it from axi_tdd_0/tdd_channel_1 alone; we OR
+      # in pps_counter/tdd_enable (above) so a capture can gate on the PPS-anchored
+      # window while streaming RX keeps working via axi_tdd (open). Drive tdd_enable ONLY
+      # as a LEVEL (drive_pins + an RX window) -- never as a 1-cyc PULSE: an earlier
+      # attempt that drove the sync from pps_counter/tdd_sync (a pulse) starved the DMA
+      # and broke all RX. The host owns the sequencing (disable axi_tdd + program the
+      # pps_counter window for a gated capture; re-open axi_tdd for streaming).
 
 # CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
 # NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
