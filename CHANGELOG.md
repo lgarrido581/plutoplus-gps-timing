@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — LibreSDR target
+
+- Added `--target libresdr` alongside the backward-compatible Pluto+ default.
+- Added a pinned LibreSDR v0.38 source overlay for GPS on G15/K14/J14, AXI
+  UART Lite, Linux PPS, `pps_counter`, GPS-synchronized `axi_tdd`, chrony,
+  sample-clock discipline, and the existing ZMQ services.
+- Added a Windows Vivado 2022.2 + Docker SD-card build workflow. LibreSDR
+  bring-up remains SD-only until the hardware acceptance checklist passes.
+
 All notable changes to this project. Versions are git tags.
 
 ## Unreleased — ZMQ capture-control API (GPS-anchored IQ)
@@ -121,7 +130,7 @@ foundation for coordinated, multi-node capture/transmit.
   disabled by default (powers up identical to v1.3). Design: [docs](hdl/pps_counter/TDD_PPS_DESIGN.md).
 - **`tdd_verify.sh`** — on-device functional proof: confirms the sample clock is locked, the frame
   counter stays bounded and re-anchors on every PPS, and `axi_tdd` is in external-sync mode consuming
-  `pps_tick`. **Validated on hardware** (`PASS`, `FRAME_SEQ` 0..~100, `axi_tdd CONTROL=0x9`). Software
+  `pps_tick`. **Validated on hardware** (`PASS`, `FRAME_SEQ` 0..~100, `axi_tdd CONTROL=0xB`). Software
   reads are ms-jittery so this proves *function*; ns/sample precision needs a scope or two-node
   cross-correlation (precision floor ±1 sample ≈ 32.6 ns until a PPS-phase TDC is added).
 - **`xo_correct.sh` robustness** — (1) **auto-derives `NOMINAL`** from the live AD936x sample rate ×

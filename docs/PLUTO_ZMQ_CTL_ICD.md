@@ -116,7 +116,7 @@ a DMA/refill fault; a malformed/unknown request. The reply is always exactly one
 ## 7. Capture semantics & safety
 
 - **PPS gating.** `tdd_sync` programs ADI `axi_tdd` channel-1 as a per-frame window
-  (`on_raw = offset_samples`), `sync_external=1` so the 1 s frame re-anchors on each GPS
+  (`on_raw = offset_samples`), with `sync_external=1` and `sync_reset=1` so the frame re-anchors on each GPS
   PPS, then arms the RX DMA (`sync_start_enable=arm`). One contiguous `iio_buffer_refill`
   = one gap-free DMA block. After the grab it disarms and restores a full-open window
   (it never *disables* the core — that starves the DMA and needs a reboot).

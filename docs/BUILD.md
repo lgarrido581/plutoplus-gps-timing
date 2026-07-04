@@ -1,5 +1,9 @@
 # Build details
 
+This document describes the default Pluto+ target. The separate LibreSDR
+Zynq-7020 target uses native Windows Vivado 2022.2 plus Docker packaging; see
+[`LIBRESDR.md`](LIBRESDR.md).
+
 The firmware is built **entirely in Docker** on top of
 [`sardylan/plutoplus`](https://github.com/sardylan/plutoplus) `fw-0.39`. See the top-level
 [`README.md`](../README.md) for the quick-start build/flash commands; this doc covers prerequisites,
@@ -21,6 +25,10 @@ the two build variants, and what the build actually changes.
 | `bash docker-run.sh` | **Base** `pluto.frm` (GPS system-time firmware). No Vivado. |
 | `bash docker-run.sh --vivado <XilinxPath> --hwlatch` | Base **+ FPGA `pps_counter`** with the F20 hardware PPS latch and the auto-started `xo_correction` discipline. |
 | `bash docker-run.sh --vivado <XilinxPath> --gpio-test` | I/O-voltage test build → `pluto-gpiotest.frm` |
+
+The equivalent explicit default is `bash docker-run.sh --target plutoplus`.
+`--target libresdr` selects a separate pinned source cache and never reuses or
+modifies the Pluto+ source volume.
 
 The Vivado path is mounted into the container at the **same absolute path** and rebuilds the FPGA
 bitstream, which is repackaged into `pluto.frm`. The stock `boot.frm` is reused unchanged (PL-only

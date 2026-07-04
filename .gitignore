@@ -5,7 +5,19 @@ output/
 src-cache/
 
 # Downloaded host tools (e.g. dfu-util binaries) — see README for how to fetch
-tools/
+tools/*
+!tools/*.ps1
+
+# Exported/generated LibreSDR Vivado workspace
+output/libresdr-hdl/
+*.xpr
+*.xsa
+*.bit
+*.jou
+*.str
+.Xil/
+__pycache__/
+*.py[cod]
 
 # Logs
 *.log

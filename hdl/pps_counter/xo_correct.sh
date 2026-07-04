@@ -43,7 +43,11 @@
 #   NOMINAL=61440000 sh xo_correct.sh   # pin nominal, skip auto-derive
 set -u
 
-PHY=/sys/bus/iio/devices/iio:device0
+PHY=""
+for d in /sys/bus/iio/devices/iio:device*; do
+    [ "$(cat "$d/name" 2>/dev/null)" = "ad9361-phy" ] && { PHY="$d"; break; }
+done
+[ -n "$PHY" ] || { echo "ERROR: ad9361-phy IIO device not found"; exit 1; }
 XO="$PHY/xo_correction"
 SRATE="$PHY/in_voltage_sampling_frequency"   # live RX sample rate (Hz); l_clk derives from it
 STATUS=0x7C460008
@@ -89,7 +93,7 @@ write_state() {  # $1=state  $2=holdover_elapsed_s
     prev_state="$1"
 }
 
-[ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); is this the --hwlatch build with PPS on F20?"; exit 1; }
+[ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); verify the PPS input and FPGA timing build"; exit 1; }
 
 ps=""
 avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
@@ -139,7 +143,7 @@ $((d))"; n=$((n + 1)); else $NAP; fi
     done
     if [ "$n" -lt 3 ]; then
         NOMINAL=${NOMINAL_ENV:-$S}
-        log "WARN: could not measure l_clk (PPS present? STATUS/F20); NOMINAL=$NOMINAL (sample_rate=$S)"
+        log "WARN: could not measure l_clk (PPS present?); NOMINAL=$NOMINAL (sample_rate=$S)"
         recompute_thresholds; return
     fi
     med=$(printf '%s\n' "$raw" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')

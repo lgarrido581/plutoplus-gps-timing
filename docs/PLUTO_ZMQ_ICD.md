@@ -112,6 +112,7 @@ Request body is **either** a JSON object `{"op":"<name>"}` **or** a bare op word
 | `schema` | string | — | no | yes | Constant `"dsn.health/1"` (timing+gps field compatibility). |
 | `api` | string | — | no | yes | Constant `"dsn.pluto_zmq/1"` (this interface + version). |
 | `node_id` | string | — | no | yes | Hostname; default `"pluto"`. |
+| `board` | string | — | no | yes | Hardware target: `"plutoplus"` or `"libresdr"`. |
 | `t_unix` | integer | s | no | yes | Provider wall-clock at emit (UNIX seconds, UTC). |
 | `uptime_s` | integer | s | no | yes | System uptime (whole seconds). |
 | `timing` | object | — | no | yes | §6.1 |

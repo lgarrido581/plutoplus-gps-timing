@@ -38,8 +38,14 @@ typedef struct {
 int  pps_ts_init(pps_ts_t *p, double nominal_cnt_hz);
 void pps_ts_close(pps_ts_t *p);
 
-/* True if the hardware PPS latch has seen at least one edge (STATUS.pps_present). */
+/* True if the hardware PPS latch has seen at least one edge (STATUS.pps_present).
+ * This flag is sticky; use pps_ts_live() when deciding whether a capture is safe. */
 bool pps_ts_present(const pps_ts_t *p);
+
+/* Prove that PPS is live by observing PPS_SEQ advance, rather than trusting the
+ * sticky STATUS/PPS_DELTA registers or modulo counter age. Waits for at most
+ * timeout_seconds and returns false if no new hardware edge arrives. */
+bool pps_ts_live(const pps_ts_t *p, double timeout_seconds);
 
 /* GPS-absolute nanoseconds of "now" (the instant LIVE_COUNT is read). */
 uint64_t pps_ts_now_ns(const pps_ts_t *p);

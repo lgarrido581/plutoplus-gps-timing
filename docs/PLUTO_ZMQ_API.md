@@ -67,6 +67,7 @@ sending again.
   "schema":  "dsn.health/1",       // identical envelope to /health (timing+gps fields)
   "api":     "dsn.pluto_zmq/1",    // marks the rf/dma extension + ZMQ transport
   "node_id": "pluto",              // hostname
+  "board": "plutoplus",            // "plutoplus" or "libresdr"
   "t_unix":  1750000000,           // server wall clock at emit (seconds)
   "uptime_s": 12345,
 
