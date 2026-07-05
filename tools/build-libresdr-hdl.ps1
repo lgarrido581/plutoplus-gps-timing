@@ -50,10 +50,18 @@ Write-Host "Building LibreSDR HDL with Vivado 2022.2..."
 # Package ADI libraries under MSYS, but launch the project with native Vivado.
 # Launching Vivado through MSYS intermittently makes built-in IP catalog Tcl
 # files appear unreadable on Windows.
-$ErrorActionPreference = "Continue"
-cmd.exe /d /s /c $libraryCommand 2>&1 | Tee-Object -FilePath $log -Append
-$libraryExit = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
+$libraryExit = 1
+for ($attempt = 1; $attempt -le 2; $attempt++) {
+    if ($attempt -gt 1) {
+        Write-Warning "ADI library packaging failed once; retrying cached IP build."
+        Start-Sleep -Seconds 2
+    }
+    $ErrorActionPreference = "Continue"
+    cmd.exe /d /s /c $libraryCommand 2>&1 | Tee-Object -FilePath $log -Append
+    $libraryExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($libraryExit -eq 0) { break }
+}
 if ($libraryExit -ne 0) { throw "ADI library build failed; see $log" }
 
 Push-Location $Project

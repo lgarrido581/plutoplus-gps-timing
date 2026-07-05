@@ -42,9 +42,10 @@ $hashLines = foreach ($name in $hashNames) {
     $hash = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
     "$hash  $name"
 }
-[IO.File]::WriteAllLines(
+$hashText = ($hashLines -join "`n") + "`n"
+[IO.File]::WriteAllText(
     (Join-Path $SdDirectory "SHA256SUMS.txt"),
-    $hashLines,
+    $hashText,
     [Text.UTF8Encoding]::new($false)
 )
 Write-Host "LibreSDR SD directory finalized: $SdDirectory"

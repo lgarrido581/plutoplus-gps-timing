@@ -5,6 +5,10 @@ a **GPS‑disciplined timing source** — a stratum‑1 NTP server *and* a GPS�
 Built entirely in Docker on [`sardylan/plutoplus`](https://github.com/sardylan/plutoplus) `fw‑0.39`;
 no local Xilinx install is needed for the base firmware.
 
+The repository also has a separate **LibreSDR Rev.5 (Zynq‑7020)** target. It
+shares the timing/services code but uses its own pinned source cache, FPGA
+overlay, Vivado 2022.2 build, and SD-card artifacts.
+
 > ✅ **Verified on hardware.** Stratum‑1, PPS‑disciplined system clock (`chronyc tracking` →
 > `Leap status: Normal`, ref `PPS`, within a few hundred ns of GPS). On the `--hwlatch` build the
 > AD936x **sample clock** is also disciplined to GPS — **−7.77 ppm → +0.02 ppm**.
@@ -90,6 +94,8 @@ GPS module → Pluto+ expansion header (map these **MIO numbers** to your board'
 
 ## Build
 
+### Pluto+
+
 ```bash
 bash docker-run.sh                                    # base firmware (no Vivado)
 bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # + FPGA sample-clock counter & discipline
@@ -97,6 +103,51 @@ bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # + FPGA sample-clock coun
 Output lands in `./output/`: **`pluto.frm`** (flash this), `pluto.dfu`, and a release zip. (The host
 `tee` pipeline may print a non‑zero exit even on success — trust the `Done.` line + `output/pluto.frm`.)
 More in [Build details](docs/BUILD.md).
+
+### LibreSDR Rev.5
+
+LibreSDR bring-up is deliberately SD-card-only. It needs Docker Desktop, native
+Vivado 2022.2, GNU Make for Windows (the commands below use Cygwin Make), and a
+FAT32 SD card.
+
+```bash
+# 1. Prepare the pinned LibreSDR/PlutoSDR HDL tree with this repo's overlay.
+bash docker-run.sh --target libresdr --prepare-hdl
+```
+
+```powershell
+# 2. Synthesize and route the FPGA image with native Windows Vivado.
+.\tools\build-libresdr-hdl.ps1 `
+  -VivadoRoot C:\Xilinx `
+  -MakeExe C:\Xilinx\Vitis_HLS\2022.2\tps\win64\msys64\mingw64\bin\make.exe
+```
+
+The GNU Make bundled with Vitis HLS is shown above; a Cygwin installation such
+as `C:\cygwin64\bin\make.exe` is also supported.
+
+```bash
+# 3. Build Linux, the rootfs, firmware, and staged SD files around that bitstream.
+bash docker-run.sh --target libresdr \
+  --prebuilt-bit output/libresdr-hdl/system_top.bit
+```
+
+```powershell
+# 4. Generate BOOT.bin and SHA256SUMS.txt with Windows bootgen.
+.\tools\finalize-libresdr-sd.ps1 -VivadoRoot C:\Xilinx
+```
+
+Copy the **contents** of `output/libresdr-sd/` to the FAT32 SD-card root.
+Keep the known-good upstream card available for recovery and do not write QSPI
+during bring-up.
+
+> **Do not reuse a stale bitstream after an HDL change.** Changes to
+> `hdl/pps_counter/`, `boards/libresdr/apply_overlay.py`, or FPGA capture/TDD
+> wiring require rerunning steps 1 and 2 before the Docker firmware build.
+> `boards/libresdr/validate_sd.sh` validates staged files and device-tree
+> identities, but it cannot prove that an old `.bit` contains the new logic.
+
+The detailed pinout, prerequisites, acceptance checklist, and recovery procedure
+are in [LibreSDR build and bring-up](docs/LIBRESDR.md).
 
 ## Flash (normal update of a working device)
 

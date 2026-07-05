@@ -18,6 +18,10 @@
 - Integrated main's coincident-PPS capture path: LibreSDR now ORs the normal
   AXI-TDD streaming gate with `pps_counter/tdd_enable`, preserves its AXI-TDD v2
   sysfs fallback, and scales PPS-window counts for its measured 4× `l_clk`.
+- Rebuilt the merged LibreSDR FPGA/Linux/SD artifacts with routed timing met and
+  documented the complete workflow in the README. The Windows helper now retries
+  a transient ADI IP-packager failure once, and `SHA256SUMS.txt` uses portable
+  LF line endings so `sha256sum -c` works on Linux and Git Bash.
 
 All notable changes to this project. Versions are git tags.
 

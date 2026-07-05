@@ -25,7 +25,8 @@ target. Use 3.3 V TTL UART, never RS-232 or 5 V logic.
 
 - Docker Desktop using WSL2.
 - Vivado 2022.2 installed natively, normally below `C:\Xilinx`.
-- GNU Make for Windows (Cygwin `make` is supported by ADI's HDL build).
+- GNU Make for Windows. The Make bundled with Vitis HLS works; Cygwin `make`
+  is also supported by ADI's HDL build.
 - A FAT32-formatted SD card.
 
 ## Build
@@ -46,8 +47,11 @@ GPS HDL overlay under `output/libresdr-hdl/`.
 ```powershell
 .\tools\build-libresdr-hdl.ps1 `
   -VivadoRoot C:\Xilinx `
-  -MakeExe C:\cygwin64\bin\make.exe
+  -MakeExe C:\Xilinx\Vitis_HLS\2022.2\tps\win64\msys64\mingw64\bin\make.exe
 ```
+
+Alternatively, pass a Cygwin installation such as
+`-MakeExe C:\cygwin64\bin\make.exe`.
 
 The result is `output/libresdr-hdl/system_top.bit`.
 
