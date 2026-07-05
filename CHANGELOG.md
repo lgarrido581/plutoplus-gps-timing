@@ -8,6 +8,13 @@
   sample-clock discipline, and the existing ZMQ services.
 - Added a Windows Vivado 2022.2 + Docker SD-card build workflow. LibreSDR
   bring-up remains SD-only until the hardware acceptance checklist passes.
+- Validated the LibreSDR sample-clock control plant on hardware at 122.88 MHz:
+  `xo_correction` measured −3.047 counter ticks/Hz, or 0.3282 Hz/count. Updated
+  the controller to milli-Hz gain precision and the measured rate-scaled gain.
+- Fixed sub-step errors repeatedly rewriting the same `xo_correction` value and
+  potentially relocking the AD936x PLL. They now report `LOCKED` without a
+  write. XO limits are read from `xo_correction_available` instead of being
+  hard-coded, with optional overrides from `/etc/default/xocorrect`.
 
 All notable changes to this project. Versions are git tags.
 

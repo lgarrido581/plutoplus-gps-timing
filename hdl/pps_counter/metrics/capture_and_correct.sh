@@ -10,9 +10,12 @@
 #
 # Usage (on the Pluto, or piped over ssh):
 #   sh capture_and_correct.sh 600 > corrected.csv
+[ -r "${XO_CORRECT_CONFIG:-/etc/default/xocorrect}" ] &&
+    . "${XO_CORRECT_CONFIG:-/etc/default/xocorrect}"
 SEQ=0x7C460018; DELTA=0x7C460014
 XO=/sys/bus/iio/devices/iio:device0/xo_correction
 SRATE_F=/sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency
+XO_AVAIL=/sys/bus/iio/devices/iio:device0/xo_correction_available
 if sleep 0.2 2>/dev/null; then NAP="sleep 0.2"; else NAP="sleep 1"; fi
 
 [ "$(devmem 0x7C460008 32)" = "0x00000001" ] || { echo "ERROR: PPS latch not present (STATUS!=1)" >&2; exit 1; }
@@ -34,11 +37,21 @@ derive_nominal() {
 }
 NOMINAL="${NOMINAL:-$(derive_nominal)}"          # target counts / GPS second
 DEADBAND="${DEADBAND:-1}"                        # |mean err| <= this -> hold (don't re-tune)
-HZ="${HZ:-$(( 130 * 30720000 / NOMINAL ))}"      # 1.30 Hz/count at 30.72M, scaled to this rate
+if [ -n "${HZ_PER_CNT_X1000:-}" ]; then
+    HZ_MILLI="$HZ_PER_CNT_X1000"
+elif [ -n "${HZ:-}" ]; then
+    HZ_MILLI=$((HZ * 10))                         # legacy HZ was centi-Hz/count
+else
+    HZ_MILLI=$(( 1313 * 30720000 / NOMINAL ))     # 1.313 Hz/count at 30.72M
+fi
+[ "$HZ_MILLI" -lt 1 ] && HZ_MILLI=1
 WIN="${WIN:-6}"                                  # edges per control update
-XO_MIN=39992000; XO_MAX=40008000
+XO_MIN=$(awk '{gsub(/^\[/, "", $1); print $1}' "$XO_AVAIL" 2>/dev/null)
+XO_MAX=$(awk '{gsub(/\]$/, "", $NF); print $NF}' "$XO_AVAIL" 2>/dev/null)
+case "$XO_MIN" in ''|*[!0-9]*) XO_MIN=39992000 ;; esac
+case "$XO_MAX" in ''|*[!0-9]*) XO_MAX=40008000 ;; esac
 N="${1:-600}"                                    # PPS edges to capture
-echo "# nominal=$NOMINAL sample_rate=$(cat $SRATE_F 2>/dev/null) hz_per_cnt_x100=$HZ ts=$(date +%s)"
+echo "# nominal=$NOMINAL sample_rate=$(cat $SRATE_F 2>/dev/null) hz_per_cnt_x1000=$HZ_MILLI xo_range=${XO_MIN}..${XO_MAX} ts=$(date +%s)"
 
 prev=-1; n=0; ssum=0; scount=0; settle=0
 while [ "$n" -lt "$N" ]; do
@@ -52,10 +65,12 @@ while [ "$n" -lt "$N" ]; do
         if [ "$scount" -ge "$WIN" ]; then
             err=$((ssum / scount)); ae=$err; [ "$ae" -lt 0 ] && ae=$((-ae))
             if [ "$ae" -gt "$DEADBAND" ]; then
-                xo=$(cat $XO); nxo=$((xo + err * HZ / 100))
+                xo=$(cat "$XO"); dxo=$((err * HZ_MILLI / 1000)); nxo=$((xo + dxo))
                 [ "$nxo" -lt "$XO_MIN" ] && nxo=$XO_MIN
                 [ "$nxo" -gt "$XO_MAX" ] && nxo=$XO_MAX
-                echo "$nxo" > $XO; settle=2
+                if [ "$dxo" -ne 0 ] && [ "$nxo" -ne "$xo" ]; then
+                    echo "$nxo" > "$XO"; settle=2
+                fi
             fi
             ssum=0; scount=0
         fi
