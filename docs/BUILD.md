@@ -15,29 +15,49 @@ the two build variants, and what the build actually changes.
 - A POSIX shell to run the `.sh` scripts. On **Windows** use **WSL2** or **Git Bash**.
 - ~5 GB free disk + network (the build downloads the kernel, buildroot packages, an ARM
   cross-toolchain, and the v0.39 FPGA `system_top.xsa`).
-- **Vivado 2023.2** *only* for the `--hwlatch` / FPGA-counter variant (it rebuilds the bitstream).
-  Not needed for the base firmware.
+- **Vivado** *only* for the `--hwlatch` / `--gpio-test` (FPGA) variants, which rebuild the bitstream —
+  **2023.2** to synth in-container (`--vivado`), **or any compatible version** if you pre-synth the bit
+  yourself and inject it (`--prebuilt-bit`, see below). Not needed for the base firmware.
 
-## Two variants
+## Build variants
 
 | Command | Produces |
 |---|---|
-| `bash docker-run.sh` | **Base** `pluto.frm` (GPS system-time firmware). No Vivado. |
-| `bash docker-run.sh --vivado <XilinxPath> --hwlatch` | Base **+ FPGA `pps_counter`** with the F20 hardware PPS latch and the auto-started `xo_correction` discipline. |
-| `bash docker-run.sh --vivado <XilinxPath> --gpio-test` | I/O-voltage test build → `pluto-gpiotest.frm` |
+| `bash docker-run.sh` | **Base** `pluto.frm` (GPS system-time firmware). No Vivado, no bitstream. |
+| `bash docker-run.sh --hwlatch …` | Base **+ FPGA `pps_counter`** (F20 hardware PPS latch + auto-started `xo_correction`). **Needs a bitstream — supply it one of the two ways below.** |
+| `bash docker-run.sh --gpio-test …` | I/O-voltage test build → `pluto-gpiotest.frm` (also needs a bitstream). |
 
 The equivalent explicit default is `bash docker-run.sh --target plutoplus`.
 `--target libresdr` selects a separate pinned source cache and never reuses or
 modifies the Pluto+ source volume.
 
-The Vivado path is mounted into the container at the **same absolute path** and rebuilds the FPGA
-bitstream, which is repackaged into `pluto.frm`. The stock `boot.frm` is reused unchanged (PL-only
-"Option B" design), so no Vitis/FSBL is needed.
+### Supplying the FPGA bitstream — pick ONE (this is the step people trip on)
 
-**No-Vivado caveat:** without Vivado the build produces **`pluto.frm` only**, not `boot.frm` (the
-FSBL + bitstream + U-Boot bootloader). For a normal firmware update of a working device, `pluto.frm`
-is all you need. To flash a fresh/bricked device's bootloader you need a Pluto+ `boot.frm` from a
-prebuilt release — see [`RECOVERY.md`](../RECOVERY.md).
+The `--hwlatch` / `--gpio-test` variants rebuild the block design, so they need a `system_top.bit`.
+There are **two** ways to give the build one — they produce the same firmware:
+
+- **(A) In-container synth — `--vivado <XilinxPath>`.** Mounts your Vivado into the container at the
+  **same absolute path** and runs synth+impl inside the build. Requires **Vivado 2023.2** (the version
+  the sardylan HDL targets). One self-contained command:
+  ```sh
+  bash docker-run.sh --vivado /path/to/Xilinx --hwlatch
+  ```
+- **(B) Pre-synth + inject — `--prebuilt-bit <system_top.bit>`.** Synthesize `system_top.bit`
+  **yourself first** (with any compatible Vivado — do this if you don't have 2023.2, or want a faster
+  bake), then hand the `.bit` to the build; **no Vivado runs in the container**:
+  ```sh
+  bash docker-run.sh --prebuilt-bit /path/to/system_top.bit --hwlatch
+  ```
+
+Either way the bit is repackaged into `pluto.frm`; the stock `boot.frm` is reused unchanged (PL-only
+"Option B", so no Vitis/FSBL). **If you change the FPGA** — `hdl/pps_counter/*` or the block-design
+patch in `docker-build-inner.sh` — you must regenerate the bit by **either** path; a stale
+`--prebuilt-bit` will silently ship the old logic.
+
+**Base vs bootloader:** the build produces **`pluto.frm` only**, never `boot.frm` (FSBL + bitstream +
+U-Boot). For a normal update of a working device, `pluto.frm` is all you need. To flash a
+fresh/bricked device's bootloader you need a Pluto+ `boot.frm` from a prebuilt release — see
+[`RECOVERY.md`](../RECOVERY.md).
 
 The build runs unattended and caches source in a Docker named volume (`plutoplus-src-cache`), so
 re-runs are fast. (The host `tee` pipeline can report a non-zero exit even on success — trust the

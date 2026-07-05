@@ -33,8 +33,9 @@ typedef struct {
     double nominal_cnt_hz;     /* fallback if PPS_DELTA looks invalid */
 } pps_ts_t;
 
-/* Map the pps_counter. Returns 0 on success. nominal_cnt_hz e.g. 61.44e6 (2R2T)
- * or 30.72e6 (1R1T) -- only used as a sanity fallback; the live PPS_DELTA wins. */
+/* Map the pps_counter. Returns 0 on success. nominal_cnt_hz is commonly 30.72e6
+ * or 61.44e6 on Pluto+, and 122.88e6 on LibreSDR. It is only a sanity fallback;
+ * the live PPS_DELTA wins. */
 int  pps_ts_init(pps_ts_t *p, double nominal_cnt_hz);
 void pps_ts_close(pps_ts_t *p);
 

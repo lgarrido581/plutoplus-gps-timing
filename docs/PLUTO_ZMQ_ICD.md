@@ -138,11 +138,11 @@ F20. On a base (no-counter) build, `pps_present=false` and the three numeric fie
 `null`. `pps_advancing` is computed only on the 1 Hz tick (a sub-second REP reports the
 cached verdict but reads `pps_present`/`pps_seq`/`cnt_clk_hz` live).
 
-`cnt_clk_hz` is the counter's clock — the AD9361 `l_clk` (data-path clock) — counted
+`cnt_clk_hz` is the counter's clock — the AD936x `l_clk` (data-path clock) — counted
 over one GPS PPS second, i.e. the `l_clk` **frequency in Hz**. It is the data clock, a
-multiple of the baseband `rf.sample_rate_hz` (e.g. **2×** in 2R2T: `61_440_001` for a
-`30_720_000` rate). GPS-disciplined it sits within ±1 count of nominal — the basis for
-`xo_ppm`.
+multiple of the baseband `rf.sample_rate_hz` (for a `30_720_000` rate, commonly
+**2×**/`61_440_000` on Pluto+ and **4×**/`122_880_000` on LibreSDR).
+GPS-disciplined it sits within a few counts of nominal — the basis for `xo_ppm`.
 
 ### 6.2 `gps` (sparse — a key appears only with a fresh value)
 

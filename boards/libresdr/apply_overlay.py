@@ -158,8 +158,14 @@ ad_connect gps_tdd_reset_inv/Res axi_tdd_0/resetn
 ad_connect gps_tdd_reset_inv/Res pps_counter_0/cnt_resetn
 ad_connect axi_ad9361/l_clk axi_tdd_0/clk
 ad_connect pps_counter_0/pps_tick axi_tdd_0/sync_in
-ad_connect axi_tdd_0/tdd_channel_1 axi_ad9361_adc_dma/fifo_wr_sync
-ad_connect axi_tdd_0/tdd_channel_1 pps_counter_0/latch_trig
+
+# Streaming uses axi_tdd channel 1 full-open. A coincident capture disables
+# axi_tdd and drives the PPS-reset pps_counter window instead.
+ad_ip_instance util_vector_logic gps_dma_sync_or [list C_OPERATION {or} C_SIZE 1]
+ad_connect axi_tdd_0/tdd_channel_1 gps_dma_sync_or/Op1
+ad_connect pps_counter_0/tdd_enable gps_dma_sync_or/Op2
+ad_connect gps_dma_sync_or/Res axi_ad9361_adc_dma/fifo_wr_sync
+ad_connect gps_dma_sync_or/Res pps_counter_0/latch_trig
 """,
 )
 replace(

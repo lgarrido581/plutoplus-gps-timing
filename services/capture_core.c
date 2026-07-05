@@ -19,8 +19,15 @@
 #include <unistd.h>
 #include <iio.h>
 
-#define LCLK_MAX_HZ 122880000.0  /* validated LibreSDR l_clk ceiling */
+#define LCLK_FALLBACK_HZ 122880000.0 /* accepts LibreSDR's validated 4x l_clk */
+#define PLUTO_LCLK_MAX_HZ 61440000.0
+#define LIBRE_LCLK_MAX_HZ 122880000.0
 #define TDD_V2_PATH "/sys/bus/platform/devices/7c440000.tdd"
+#define ARM_LEAD_S  0.35         /* arm the RX DMA this long before t0 so it catches the
+                                  * t0 PPS edge. The capture therefore gates on the first
+                                  * PPS at/after (t0 - ARM_LEAD_S); used by BOTH the t0
+                                  * wait and the Level-1 integer-second anchor -- keep in
+                                  * sync (a single constant so they cannot drift). */
 
 static struct iio_device *g_tdd = NULL;
 static int g_tdd_v2 = 0;
@@ -35,55 +42,30 @@ static int sysfs_write(const char *name, long long value) {
     return rc;
 }
 
-/* GPS-sequenced capture via the ADI axi_tdd core (no firmware change): the base BD
- * wires axi_tdd_0/tdd_channel_1 -> RX-DMA/sync (LEVEL: DMA transfers while HIGH) and
- * pps_tick -> axi_tdd/sync_in (GPS-anchors the frame). Program channel1 as a window
- * [on_raw, off_raw) per frame. sync_external selects the GPS input and sync_reset
- * makes every GPS edge reset the running counter (external sync alone only starts
- * an armed core).
- * An armed RX buffer then starts when the window opens = a GPS-deterministic edge.
- * TDD raw counts are in sample-clock (fs) units. (Verbatim from iq_capture.c.) */
-static int configure_tdd(struct iio_context *ctx, long long frame_raw,
-                         long long on_raw, long long off_raw) {
+/* Coincident (PPS-anchored) capture. ADI's axi_tdd frame free-runs vs the GPS 1PPS -- it
+ * re-syncs sync_in only ONCE at enable, not per pulse -- so its window drifts and cannot
+ * align across nodes. The BD ORs axi_tdd/tdd_channel_1 with pps_counter/tdd_enable into
+ * the RX-DMA sync (LEVEL: DMA transfers while HIGH); pps_counter resets its frame to 0 on
+ * EVERY PPS edge. So for a gated capture we DISABLE axi_tdd -- which forces tdd_channel_1
+ * LOW (validated: disabling the core latches ch1 low) -- and let pps_counter own the OR
+ * via its PPS-anchored window (programmed by the caller with pps_ts_config_frame). The
+ * window then opens coincident across nodes. restore_rx_mode() re-opens axi_tdd for
+ * free-running streaming RX. TDD raw counts are in sample-clock (fs) units. */
+static int configure_tdd(struct iio_context *ctx) {
     g_tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
     g_tdd_v2 = 0;
     if (!g_tdd && access(TDD_V2_PATH "/enable", F_OK) == 0) {
         g_tdd_v2 = 1;
-        if (frame_raw < 2) return -1;
-        if (sysfs_write("enable", 0) ||
-            sysfs_write("frame_length_raw", frame_raw + (frame_raw / 10)) ||
-            sysfs_write("out_channel1_on_raw", on_raw) ||
-            sysfs_write("out_channel1_off_raw", off_raw) ||
-            sysfs_write("out_channel1_polarity", 0) ||
-            sysfs_write("out_channel1_enable", 1) ||
-            sysfs_write("sync_external", 1) ||
-            sysfs_write("sync_reset", 1) ||
-            sysfs_write("enable", 1))
-            return -2;
-
-        return 0;
+        return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
-    if (!g_tdd) return -3;
-    struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
-    if (!ch1) return -4;
-    char b[32];
-    iio_device_attr_write(g_tdd, "enable", "0");
-    long long guarded_frame_raw = frame_raw + (frame_raw / 10);
-    snprintf(b, sizeof b, "%lld", guarded_frame_raw);
-    iio_device_attr_write(g_tdd, "frame_length_raw", b);
-    snprintf(b, sizeof b, "%lld", on_raw);     iio_channel_attr_write(ch1, "on_raw", b);
-    snprintf(b, sizeof b, "%lld", off_raw);    iio_channel_attr_write(ch1, "off_raw", b);
-    iio_channel_attr_write(ch1, "polarity", "0");
-    iio_channel_attr_write(ch1, "enable", "1");
-    iio_device_attr_write(g_tdd, "sync_external", "1");
-    iio_device_attr_write(g_tdd, "sync_reset", "1");      /* re-anchor every PPS */
-    iio_device_attr_write(g_tdd, "enable", "1");
-    return 0;
+    if (!g_tdd) return -1;
+    return iio_device_attr_write(g_tdd, "enable", "0");
 }
 
-/* Restore normal RX WITHOUT a reboot: do NOT disable the core (that latches channel1
- * LOW and starves the DMA). Instead set channel1 to a full-open window (always HIGH)
- * so the RX DMA captures freely again. Validated live. (Verbatim from iq_capture.c.) */
+/* Restore free-running streaming RX WITHOUT a reboot. A gated capture disabled axi_tdd (to
+ * yield the RX-DMA OR to pps_counter); re-enable it full-open (channel1 always HIGH) so the
+ * OR is HIGH again and the RX DMA captures freely, and drop pps_counter's window so only
+ * axi_tdd gates streaming. */
 static void restore_rx_mode(long long frame_len, long long rate) {
     if (g_tdd_v2) {
         long long flen = frame_len > 1 ? frame_len : rate;
@@ -95,18 +77,24 @@ static void restore_rx_mode(long long frame_len, long long rate) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 1);
         sysfs_write("enable", 1);
+        pps_ts_disable_frame();
         return;
     }
-    if (!g_tdd) return;
-    struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
-    char b[32];
-    if (ch1) {
-        iio_channel_attr_write(ch1, "on_raw", "0");
+    if (g_tdd) {
+        struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
+        char b[32];
         snprintf(b, sizeof b, "%lld", frame_len > 0 ? frame_len : rate);
-        iio_channel_attr_write(ch1, "off_raw", b);   /* off = frame_length -> always high */
-        iio_channel_attr_write(ch1, "enable", "1");
+        iio_device_attr_write(g_tdd, "enable", "0");
+        iio_device_attr_write(g_tdd, "frame_length_raw", b);
+        if (ch1) {
+            iio_channel_attr_write(ch1, "on_raw", "0");
+            iio_channel_attr_write(ch1, "off_raw", b);   /* off = frame_length -> always high */
+            iio_channel_attr_write(ch1, "polarity", "0");
+            iio_channel_attr_write(ch1, "enable", "1");
+        }
+        iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
     }
-    /* leave the core ENABLED (disabling it is what breaks RX) */
+    pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
 }
 
 /* ISO8601 UTC with ns, e.g. 2026-06-23T18:04:05.123456789Z */
@@ -142,11 +130,13 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         return fail(out, "ad9361 devices/channels not found");
     }
 
-    /* --- §7 channel-mode rate cap. l_clk = n_active_rx * sample_rate; refuse any
+    /* --- §7 channel-mode rate cap. l_clk = interface_multiple * sample_rate; refuse any
      * requested rate whose l_clk would overrun the AD9361 interface (-> DMA wedge).
-     * Detect n_active from the live counter (PPS_DELTA) vs the current sysfs rate. */
+     * Detect the multiple from the live counter (PPS_DELTA) vs the sysfs rate.
+     * Pluto+ is normally 1x/2x with a 61.44 MHz ceiling; LibreSDR's validated
+     * 2R2T LVDS design is 4x with a 122.88 MHz ceiling. */
     pps_ts_t pps;
-    int have_pps = (pps_ts_init(&pps, LCLK_MAX_HZ) == 0);
+    int have_pps = (pps_ts_init(&pps, LCLK_FALLBACK_HZ) == 0);
     long long cur_rate = 0;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur_rate);
     int lclk_multiple = 2;  /* conservative Pluto+ fallback */
@@ -157,7 +147,8 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             if (r >= 1 && r <= 4) lclk_multiple = (int)r;
         }
     }
-    double max_rate = LCLK_MAX_HZ / (double)lclk_multiple;
+    double lclk_max = lclk_multiple > 2 ? LIBRE_LCLK_MAX_HZ : PLUTO_LCLK_MAX_HZ;
+    double max_rate = lclk_max / (double)lclk_multiple;
     if (max_rate > 61440000.0) max_rate = 61440000.0; /* AD936x sample-rate limit */
     if ((double)req->rate_hz > max_rate) {
         char m[160];
@@ -221,14 +212,14 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     if (req->tdd_sync) {
         method = "tdd_pps_window";
         /* GUARD: arming the DMA without a window that WILL open wedges it (reboot to
-         * clear). Require a live GPS PPS so the sync_external frame actually runs. */
+         * clear). Require a live GPS PPS so pps_counter's PPS-anchored frame runs. */
         if (!live_pps) {
             if (have_pps) pps_ts_close(&pps);
             iio_context_destroy(ctx);
             return fail(out, "tdd_sync needs a live GPS PPS (would wedge the DMA)");
         }
         frame_len = lclk_multiple * req->rate_hz;  /* one GPS second in l_clk counts */
-        /* channel1 window [on_raw, off_raw): on_raw = offset_samples; off must cover the
+        /* pps_counter window [on_raw, off_raw): on_raw = offset_samples; off must cover the
          * offset + whole capture + arm-latency margin and stay inside the frame. */
         long long on_raw = req->offset_samples * lclk_multiple;
         off_raw = (req->offset_samples + (long long)req->samples +
@@ -243,10 +234,21 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             iio_context_destroy(ctx);
             return fail(out, m);
         }
-        if (configure_tdd(ctx, frame_len, on_raw, off_raw) != 0) {
+        if (configure_tdd(ctx) != 0) {
             pps_ts_close(&pps);
             iio_context_destroy(ctx);
-            return fail(out, "axi_tdd channel1 config failed");
+            return fail(out, "axi_tdd (iio-axi-tdd-0) not found");
+        }
+        /* Program pps_counter's PPS-anchored RX window [offset, off_raw). cnt_clk == the
+         * AD936x sample clock (== l_clk), so these counts are the same sample units as the
+         * axi_tdd path. drive_pins makes tdd_enable output the window; the BD ORs it into
+         * the RX-DMA sync -> sample[0] lands on a GPS-locked edge, coincident across nodes. */
+        if (pps_ts_config_frame((uint32_t)frame_len, (uint32_t)on_raw,
+                                (uint32_t)off_raw) != 0) {
+            restore_rx_mode(frame_len, req->rate_hz);
+            pps_ts_close(&pps);
+            iio_context_destroy(ctx);
+            return fail(out, "pps_counter frame config failed (/dev/mem)");
         }
         iio_context_set_timeout(ctx, 4000);   /* a missed window errors, not hangs */
 
@@ -256,7 +258,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             struct timespec now;
             clock_gettime(CLOCK_REALTIME, &now);
             double now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
-            double wait = req->t0_gps - now_s - 0.35;
+            double wait = req->t0_gps - now_s - ARM_LEAD_S;
             if (wait <= 0.0 || wait >= 60.0) {
                 restore_rx_mode(frame_len, req->rate_hz);
                 pps_ts_close(&pps);
@@ -377,6 +379,36 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         }
     }
 
+    /* --- Level 1: take the INTEGER second from the agreed shared schedule (t0_gps),
+     * not the local OS clock. chrony can lock the wrong integer second -- gpsd pins an
+     * NMEA epoch to the wrong PPS pulse at 9600 baud, so the clock is phase-perfect but
+     * a whole second off (stable for the lock session). The hardware sub-second
+     * (anchor.gps_ns % 1e9, from the PPS counter) is unambiguous; only the integer
+     * second is fragile. In tdd_sync the capture gates on the first PPS at/after the arm
+     * point (t0 - ARM_LEAD_S), so sample 0's true second is ceil(t0 - ARM_LEAD_S) -- for
+     * a well-formed integer t0 (a real PPS edge) that is just t0, but it stays correct if
+     * t0 carries a fractional part. Re-base to that + the HW sub-second. If the OS clock
+     * disagrees by >=1 s, log it and flag the capture degraded -- the consumer can drop it
+     * (a skew also means the arm may have gated the wrong PHYSICAL edge, which relabeling
+     * cannot fix; that is what the Level-2 gpsd/chrony hardening prevents). */
+    int coarse_skew_s = 0;
+    const char *second_src = "os_clock";
+    if (req->tdd_sync && req->have_t0) {
+        const uint64_t NS = 1000000000ULL;
+        uint64_t sub_ns  = anchor.gps_ns % NS;             /* HW phase within the second */
+        long long os_sec = (long long)(anchor.gps_ns / NS);
+        double gate = req->t0_gps - ARM_LEAD_S;            /* arm point; gate = next PPS >= this */
+        long long t0_sec = (long long)gate;                /* floor (gate is positive) ... */
+        if ((double)t0_sec < gate) t0_sec += 1;            /* ... -> ceil = the gated PPS second */
+        coarse_skew_s = (int)(os_sec - t0_sec);
+        anchor.gps_ns = (uint64_t)t0_sec * NS + sub_ns;    /* trusted second + HW sub-second */
+        second_src = "t0_gps";
+        if (coarse_skew_s != 0)
+            fprintf(stderr, "pluto_ctld: coarse-second skew %+d s (OS %lld vs gated t0 %lld) -- "
+                    "anchored to schedule, flagged degraded\n", coarse_skew_s, os_sec, t0_sec);
+    }
+    int degraded = (!anchor.present) || (coarse_skew_s != 0);
+
     /* --- build the SigMF metadata (in memory). core:frequency = read-back LO. */
     char dt[64]; iso8601_ns(anchor.gps_ns, dt, sizeof dt);
     double xo_ppm = ((double)anchor.cnt_hz - nominal_cnt) / nominal_cnt * 1e6;
@@ -418,15 +450,18 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"gpsanchor:method\": \"%s\",\n"
       "      \"gpsanchor:sample_index0\": %u,\n"
       "      \"gpsanchor:pps_count\": %u,\n"
-      "      \"gpsanchor:pps_seq\": %u\n"
+      "      \"gpsanchor:pps_seq\": %u,\n"
+      "      \"gpsanchor:second_source\": \"%s\",\n"
+      "      \"gpsanchor:coarse_skew_s\": %d\n"
       "    }\n"
       "  ],\n"
       "  \"annotations\": []\n"
       "}\n",
       req->rate_hz, node, posbuf,
-      anchor.present ? "true" : "false", xo_ppm, anchor.present ? "false" : "true",
+      anchor.present ? "true" : "false", xo_ppm, degraded ? "true" : "false",
       actual_lo, dt, (unsigned long long)anchor.gps_ns, anchor.cnt_hz,
-      method, anchor.live_count, anchor.pps_count, anchor.pps_seq);
+      method, anchor.live_count, anchor.pps_count, anchor.pps_seq,
+      second_src, coarse_skew_s);
 
     /* copy the IQ out of the iio buffer (freed below). */
     uint8_t *iqcopy = (uint8_t *)malloc(bytes ? bytes : 1);

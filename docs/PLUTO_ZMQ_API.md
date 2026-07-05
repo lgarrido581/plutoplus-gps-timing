@@ -78,10 +78,11 @@ sending again.
                                    //   two ticks have elapsed, or if no counter.
     "pps_seq":       42,           // pps_counter SEQ (increments once per GPS PPS edge)
     "xo_ppm":        0.0,          // last value the xocorrect daemon logged. It auto-derives
-                                   //   nominal from live rate x channel mode, so it is correct
-                                   //   in 1R1T and 2R2T (no client-side guess). null if absent.
+                                   //   nominal from live rate x interface multiplier, so it
+                                   //   works on Pluto+ and LibreSDR. null if absent.
     "cnt_clk_hz":    61440000      // DELTA reg = AD9361 l_clk ticks per PPS second (data clock,
-                                   //   ~2x sample_rate in 2R2T). GPS-disciplined; basis for xo_ppm.
+                                   //   commonly 2x on Pluto+, 4x on LibreSDR). GPS-disciplined;
+                                   //   basis for xo_ppm.
   },
 
   "gps": {                         // gpsd (persistent client). Only fields with a value appear.

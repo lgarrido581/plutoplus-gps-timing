@@ -92,11 +92,42 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   capture, else a frame-grid snap (`"tdd_pps_window"`), else the free-running anchor
   (`"live_count_at_refill"`). Epoch is the PPS-disciplined `CLOCK_REALTIME` — consistent
   on every node, which is all DSN's cross-node differencing needs.
+  - ⚠️ **The `tdd_pps_latch` path needs a bitstream that actually contains the DMA-start
+    latch registers** (`LATCH_COUNT`/`LATCH_SEQ` at 0x3C/0x40, added in HDL commit
+    `d329bbc`, built via `--hwlatch`). The **prebuilt `v1.5` bitstream predates that commit**
+    (its `pps_counter` has a 6-bit address decode: reading 0x40 aliases back to the 0x00 ID
+    `0x50505343`, and 0x3C reads 0). On that image the latch can **never** fire, so every
+    capture uses `tdd_pps_window` — a frame-grid *assertion* that the window opened on a PPS
+    edge, not a measurement. To get true ±~16 ns `gps_ns0`, rebuild the bitstream from
+    `d329bbc`+ (`docker-run.sh --vivado <vivado-2023.2> --hwlatch`, which also re-drives
+    `axi_tdd/sync_in` from `pps_tick` so the frame re-anchors every PPS instead of free-
+    running). The firmware already reads the latch correctly — it just needs the register to
+    exist. Confirm on hardware with `devmem 0x7C460040 32`: a real latch counts up from a
+    small value; `0x50505343` means the latch isn't in the image.
+- **Integer-second anchoring (`tdd_sync` + `t0_gps`).** The hardware sub-second
+  (`pps_counter` phase within the second) is unambiguous, but the *integer* second comes
+  from the OS clock, which chrony can lock a whole second off (gpsd pinning an NMEA epoch
+  to the wrong PPS pulse at 9600 baud — phase-perfect, second wrong). Because `tdd_sync`
+  gates sample 0 on the **first PPS at/after the arm point** (`t0_gps − 0.35 s` arm lead),
+  sample 0's true integer second is the **scheduled PPS edge** — `ceil(t0_gps − 0.35)`,
+  which for a well-formed integer `t0_gps` (a real PPS edge) is just `t0_gps`, and stays
+  correct if `t0_gps` carries a fractional part. The server sets
+  `gps_ns0 = scheduled_edge·1e9 + HW_sub_second` and reports the source in
+  **`captures[0]["gpsanchor:second_source"]`** (`"t0_gps"` when rebased, else
+  `"os_clock"`). **Send an integer (PPS-edge) `t0_gps`** for the cleanest contract. If the
+  OS clock disagreed with the scheduled edge by ≥1 s, that delta is reported in
+  **`captures[0]["gpsanchor:coarse_skew_s"]`** (integer s, signed) and the capture is
+  flagged `timing:health.degraded = true` — **a non-zero skew means the arm may have gated
+  the wrong physical edge, so the consumer should drop the capture** rather than trust the
+  relabeled anchor. (The Level-2 gpsd/chrony hardening prevents the wrong lock in the first
+  place.)
 - **`captures[0]["core:frequency"]`** (number, Hz) — the **AD9361 LO read back**, not
   the requested `freq_hz` (the chip silently clamps an out-of-range LO); DSN trusts this.
 - `global["timing:health"]` = `{ pps_present (bool), degraded (bool), xo_ppm (number),
-  latch_rms_ns (number) }`. Also emitted: `gpsanchor:cnt_clk_hz`, `:pps_seq`,
-  `:pps_count`, `:sample_index0`, `:method`, `core:datetime`, `core:sample_start`.
+  latch_rms_ns (number) }`. `degraded` is true if PPS is absent **or** a coarse-second
+  skew was detected (above). Also emitted: `gpsanchor:cnt_clk_hz`, `:pps_seq`,
+  `:pps_count`, `:sample_index0`, `:method`, `:second_source`, `:coarse_skew_s`,
+  `core:datetime`, `core:sample_start`.
 
 ### Frame 1 — IQ payload (raw bytes)
 
@@ -115,22 +146,43 @@ a DMA/refill fault; a malformed/unknown request. The reply is always exactly one
 
 ## 7. Capture semantics & safety
 
-- **PPS gating.** `tdd_sync` programs ADI `axi_tdd` channel-1 as a per-frame window
-  (`on_raw = offset_samples`), with `sync_external=1` and `sync_reset=1` so the frame re-anchors on each GPS
-  PPS, then arms the RX DMA (`sync_start_enable=arm`). One contiguous `iio_buffer_refill`
-  = one gap-free DMA block. After the grab it disarms and restores a full-open window
-  (it never *disables* the core — that starves the DMA and needs a reboot).
+- **PPS gating.** `tdd_sync` disables ADI `axi_tdd` channel 1 temporarily and
+  programs `pps_counter`'s RX window, whose frame resets on every GPS PPS. The
+  FPGA ORs that window with the normal AXI-TDD streaming gate before the RX DMA.
+  One contiguous `iio_buffer_refill` = one gap-free DMA block. After the grab,
+  the server disables the PPS window and restores AXI-TDD full-open streaming.
 - **Measured anchor.** The FPGA latches the `cnt_clk` count of sample 0 on the DMA-start
   edge (`LATCH_COUNT`/`LATCH_SEQ`, race-free); the server confirms the latch fired for
   *this* capture (seq advanced) and reports the hardware time, else falls back.
-- **Rate cap (enforced).** The AD9361 data clock `l_clk = n_active_rx × sample_rate`;
-  overrunning the interface wedges the RX DMA (reboot to clear). The server detects
-  `n_active_rx` from the live counter vs. the current rate and **refuses** rates above
-  `61.44 MHz / n_active_rx` (61.44 MSPS for 1R1T, 30.72 MSPS for 2R2T) with an error
-  frame — it does not attempt the capture.
+- **Rate cap (enforced).** The AD936x data clock is
+  `l_clk = interface_multiplier × sample_rate`; overrunning the interface wedges
+  the RX DMA (reboot to clear). The server detects the multiplier from the live
+  counter and current rate. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
+  1×/2×); LibreSDR's validated 2R2T LVDS path uses 4× with a 122.88 MHz ceiling.
+  Both therefore cap the common 2R2T configuration at 30.72 MSPS.
 - **Blocking** is expected: a reply takes ≈ `max(0, t0_gps − now) + samples/rate +
   transfer`. The client's default timeout is 30 s, so a near-future `t0_gps` is fine.
   One capture at a time (REP serializes).
+
+## 7a. Coexistence — one radio owner
+
+The AD9361 is a single shared resource. **`pluto_ctld` must be the *only* thing driving
+the radio.** Two concurrent owners of the chip will wedge the RX DMA (`errno-110`, "window
+missed / DMA error" on every subsequent capture until reboot) — this is a hardware
+limitation, not a daemon bug, and it cannot be papered over server-side.
+
+- **Do NOT also run a host-side libiio capture path** (e.g. the deprecated
+  `TddPlutoCaptureSource` that arms `sync_start_enable` / reprograms `axi_tdd` over the
+  *network* libiio backend). Pick one path: the `:5562` offload API **or** host-side
+  libiio — never both at once. Running both is the classic way to wedge the DMA.
+- **`xo_correct.sh` is made capture-safe.** Writing `xo_correction` re-derives the chip
+  clocks and resets the sample rate (a rate change mid-DMA wedges the capture). While a
+  capture is in flight `pluto_ctld` drops `/tmp/pluto_ctld.capturing`; `xo_correct.sh`
+  **skips its correction** while that lock is fresh (stale locks > 2 min are ignored, and
+  `/tmp` is tmpfs so it clears on reboot — a crashed daemon cannot stall discipline). GPS
+  discipline simply resumes between captures.
+- A wedge, if one is provoked anyway, **requires a reboot** (`ssh root@<pluto> reboot`) —
+  a power-cycle is not needed, and disabling the `axi_tdd` core does not clear it.
 
 ## 8. Security
 
