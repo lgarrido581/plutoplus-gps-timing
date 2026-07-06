@@ -55,6 +55,39 @@ Alternatively, pass a Cygwin installation such as
 
 The result is `output/libresdr-hdl/system_top.bit`.
 
+The build uses `libresdr_lvds_timing.xdc` to constrain the source-synchronous
+AD9361 receive interface at its maximum 245.76 MHz 2R2T clock. ADI's published
+0.25 ns to 1.25 ns clock-to-data limits are applied on both DDR edges with an
+explicit zero-inter-signal-PCB-skew assumption. FPGA input delay and lane skew
+also have explicit routing budgets.
+
+Linux calibrates the AD9361 clock/data delay and FPGA IDELAY taps before it
+registers the RX IIO device. Static hold analysis at the bitstream reset tap
+therefore does not represent the operating link. Only those external-input to
+RX-IDDR hold paths are excepted; their replacement acceptance check is the
+mandatory runtime PRBS matrix in `verify_lvds.sh`. All internal hold and setup
+paths remain timed. A post-route Tcl guard rejects missing, unconstrained,
+non-finite, or failing constraints. Reports are written below
+`output/libresdr-hdl/projects/libre/libre.runs/impl_1/`:
+
+- `libresdr_lvds_setup.rpt`
+- `libresdr_lvds_hold.rpt`
+- `libresdr_lvds_lane_delays.rpt`
+- `libresdr_timing_summary.rpt`
+- `libresdr_check_timing.rpt`
+
+Do not restore a global `Performance_Explore` implementation override to make
+an unrelated path pass. Correct real internal violations locally by registering
+long logic, controlling fanout, or applying justified CDC constraints.
+
+The PPS-counter TDD gate uses registered boundary events rather than
+combinational 32-bit range comparators at the 245.76 MHz clock. Its half-open
+window behavior has a host-side regression:
+
+```powershell
+python hdl/pps_counter/test_tdd_window_model.py
+```
+
 ### 3. Build Linux and stage the SD image
 
 ```sh
@@ -102,9 +135,23 @@ devmem 0x7C460008 32
 devmem 0x7C440000 32
 
 iio_info
-iio_readdev -b 8192 cf-ad9361-lpc voltage0 voltage1 > /tmp/rx.iq
+iio_readdev -s 8192 -b 8192 cf-ad9361-lpc voltage0 voltage1 > /tmp/rx.iq
 pluto_zmqd --print
 ```
+
+With capture clients idle, run the packaged LVDS acceptance test:
+
+```sh
+verify_lvds.sh | tee /tmp/libresdr-lvds-$(date +%Y%m%d-%H%M%S).txt
+```
+
+It rejects a missing RX IIO device or boot-time tuning failure, runs the
+kernel's non-transmitting 16x16 RX PRBS clock/data-delay analysis, requires a
+passing run with at least two delay settings of margin on each side, and reads
+8192 samples from both receive channels. The matrix characterizes the complete
+AD9361 + PCB + FPGA link; it must not be reported as PCB-only skew. Record the
+matrix with the bitstream SHA256, board revision, sample rate, temperature, and
+cold-boot count.
 
 Then run `hdl/pps_counter/tdd_verify.sh` and
 `hdl/pps_counter/tdd_tx_test.sh`. Verify PPS loss enters holdover, PPS return

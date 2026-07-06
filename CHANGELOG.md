@@ -22,6 +22,12 @@
   documented the complete workflow in the README. The Windows helper now retries
   a transient ADI IP-packager failure once, and `SHA256SUMS.txt` uses portable
   LF line endings so `sha256sum -c` works on Linux and Git Bash.
+- Replaced LibreSDR's design-wide `Performance_Explore` workaround with explicit
+  245.76 MHz source-synchronous AD9361 LVDS constraints. Post-route validation
+  now rejects untimed or failing RX setup/path/skew requirements. The PPS/TDD
+  gate uses registered boundary events to remove its long 32-bit range path,
+  with a behavioral regression for window equivalence. `verify_lvds.sh`
+  captures the hardware PRBS timing eye plus a bounded two-channel RX sample.
 
 All notable changes to this project. Versions are git tags.
 

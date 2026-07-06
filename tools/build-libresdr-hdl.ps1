@@ -98,8 +98,22 @@ if (-not (Select-String -LiteralPath $timingReport `
     throw "Routed design does not meet all timing constraints; see $timingReport"
 }
 
+$lvdsReport = Join-Path $Project "libre.runs\impl_1\libresdr_lvds_setup.rpt"
+$lvdsHoldReport = Join-Path $Project "libre.runs\impl_1\libresdr_lvds_hold.rpt"
+$lvdsLaneReport = Join-Path $Project "libre.runs\impl_1\libresdr_lvds_lane_delays.rpt"
+$lvdsSummary = Join-Path $Project "libre.runs\impl_1\libresdr_timing_summary.rpt"
+foreach ($report in @($lvdsReport, $lvdsHoldReport, $lvdsLaneReport, $lvdsSummary)) {
+    if (-not (Test-Path $report)) {
+        throw "LibreSDR LVDS timing validation report is missing: $report"
+    }
+}
+if (Select-String -LiteralPath $lvdsReport -Pattern "Slack:\s+(inf|nan)" -Quiet) {
+    throw "LibreSDR LVDS setup timing contains a non-finite path; see $lvdsReport"
+}
+
 $dest = Join-Path $HdlRoot "system_top.bit"
 Copy-Item $bit $dest -Force
 Write-Host "Bitstream ready: $dest"
 Write-Host "Routed timing constraints: MET"
+Write-Host "AD9361 LVDS setup/path/skew constraints: MET"
 Write-Host "Next: bash docker-run.sh --target libresdr --prebuilt-bit output/libresdr-hdl/system_top.bit"

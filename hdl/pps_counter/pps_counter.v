@@ -118,10 +118,29 @@ module pps_counter #(
     reg  [31:0] rx_stop   = 32'd0;  // RX window = [rx_start, rx_stop); disabled when rx_stop==0
     reg  [31:0] tx_start  = 32'd0;
     reg  [31:0] tx_stop   = 32'd0;  // TX window = [tx_start, tx_stop); disabled when tx_stop==0
+    // Boundary-minus-two values are calculated once in the 100 MHz AXI
+    // domain. Equality detectors set one-cycle event registers ahead of each
+    // boundary, keeping their carry chains out of the window/DMA control path.
+    reg  [31:0] frame_len_m2 = 32'hFFFFFFFE;
+    reg  [31:0] rx_start_m2  = 32'hFFFFFFFE;
+    reg  [31:0] rx_stop_m2   = 32'hFFFFFFFE;
+    reg  [31:0] tx_start_m2  = 32'hFFFFFFFE;
+    reg  [31:0] tx_stop_m2   = 32'hFFFFFFFE;
+    reg         frame_len_valid = 1'b0;
+    reg         frame_len_one   = 1'b0;
+    reg         rx_zero_active  = 1'b0;
+    reg         tx_zero_active  = 1'b0;
+    reg         rx_start_one    = 1'b0;
+    reg         rx_stop_one     = 1'b0;
+    reg         tx_start_one    = 1'b0;
+    reg         tx_stop_one     = 1'b0;
 
     // 2-FF sync config into cnt_clk (stable-while-enabled contract above)
     reg  [4:0]  tdc_s1, tdc_s2;
     reg  [31:0] flen_s1, flen_s2, rxa_s1, rxa_s2, rxo_s1, rxo_s2, txa_s1, txa_s2, txo_s1, txo_s2;
+    reg  [31:0] flenm2_s1, flenm2_s2, rxam2_s1, rxam2_s2, rxom2_s1, rxom2_s2;
+    reg  [31:0] txam2_s1, txam2_s2, txom2_s1, txom2_s2;
+    reg  [7:0]  tdf_s1, tdf_s2;
     always @(posedge cnt_clk) begin
         tdc_s1  <= tdd_ctrl;  tdc_s2  <= tdc_s1;
         flen_s1 <= frame_len; flen_s2 <= flen_s1;
@@ -129,12 +148,28 @@ module pps_counter #(
         rxo_s1  <= rx_stop;   rxo_s2  <= rxo_s1;
         txa_s1  <= tx_start;  txa_s2  <= txa_s1;
         txo_s1  <= tx_stop;   txo_s2  <= txo_s1;
+        flenm2_s1 <= frame_len_m2; flenm2_s2 <= flenm2_s1;
+        rxam2_s1  <= rx_start_m2;  rxam2_s2  <= rxam2_s1;
+        rxom2_s1  <= rx_stop_m2;   rxom2_s2  <= rxom2_s1;
+        txam2_s1  <= tx_start_m2;  txam2_s2  <= txam2_s1;
+        txom2_s1  <= tx_stop_m2;   txom2_s2  <= txom2_s1;
+        tdf_s1 <= {tx_stop_one, tx_start_one, rx_stop_one, rx_start_one,
+                   tx_zero_active, rx_zero_active, frame_len_one, frame_len_valid};
+        tdf_s2 <= tdf_s1;
     end
     wire        tdd_en    = tdc_s2[0];
     wire        tdd_ppsr  = tdc_s2[1];   // re-anchor frame on PPS
     wire        tdd_drive = tdc_s2[2];
     wire        tdd_txpol = tdc_s2[3];
     wire        tdd_enpol = tdc_s2[4];
+    wire        flen_valid_s2 = tdf_s2[0];
+    wire        flen_one_s2   = tdf_s2[1];
+    wire        rx_zero_s2    = tdf_s2[2];
+    wire        tx_zero_s2    = tdf_s2[3];
+    wire        rxa_one_s2    = tdf_s2[4];
+    wire        rxo_one_s2    = tdf_s2[5];
+    wire        txa_one_s2    = tdf_s2[6];
+    wire        txo_one_s2    = tdf_s2[7];
 
     // ----------------------------------------------------------------- //
     // Counter domain: free-run counter + PPS edge detect + latch
@@ -179,29 +214,62 @@ module pps_counter #(
     reg  [31:0] frame_cnt  = 32'd0;
     reg  [31:0] frame_seq  = 32'd0;     // frames since last PPS (resets on PPS)
     reg         sync_pulse = 1'b0;
-    wire        frame_wrap = (frame_cnt >= (flen_s2 - 32'd1));
+    reg         in_rx_r    = 1'b0;
+    reg         in_tx_r    = 1'b0;
+    reg         frame_wrap_r = 1'b0;
+    reg         rx_start_event_r = 1'b0;
+    reg         rx_stop_event_r  = 1'b0;
+    reg         tx_start_event_r = 1'b0;
+    reg         tx_stop_event_r  = 1'b0;
     always @(posedge cnt_clk or negedge cnt_resetn) begin
         if (!cnt_resetn) begin
             frame_cnt <= 0; frame_seq <= 0; sync_pulse <= 0;
+            in_rx_r <= 0; in_tx_r <= 0;
+            frame_wrap_r <= 0;
+            rx_start_event_r <= 0; rx_stop_event_r <= 0;
+            tx_start_event_r <= 0; tx_stop_event_r <= 0;
         end else begin
             sync_pulse <= 1'b0;
-            if (!tdd_en || flen_s2 == 32'd0) begin
+            if (!tdd_en || !flen_valid_s2) begin
                 frame_cnt <= 0; frame_seq <= 0;
+                // Preload zero-based windows while disabled. Configuration is
+                // required to be stable before enable, so the first enabled
+                // frame starts with the correct state and no warm-up frame.
+                in_rx_r <= rx_zero_s2; in_tx_r <= tx_zero_s2;
+                frame_wrap_r <= flen_one_s2;
+                rx_start_event_r <= rxa_one_s2; rx_stop_event_r <= rxo_one_s2;
+                tx_start_event_r <= txa_one_s2; tx_stop_event_r <= txo_one_s2;
             end else if (pps_rise && tdd_ppsr) begin
                 frame_cnt <= 0; frame_seq <= 0; sync_pulse <= 1'b1;  // GPS re-anchor
-            end else if (frame_wrap) begin
+                in_rx_r <= rx_zero_s2; in_tx_r <= tx_zero_s2;
+                frame_wrap_r <= flen_one_s2;
+                rx_start_event_r <= rxa_one_s2; rx_stop_event_r <= rxo_one_s2;
+                tx_start_event_r <= txa_one_s2; tx_stop_event_r <= txo_one_s2;
+            end else if (frame_wrap_r) begin
                 frame_cnt <= 0; frame_seq <= frame_seq + 32'd1; sync_pulse <= 1'b1;
+                in_rx_r <= rx_zero_s2; in_tx_r <= tx_zero_s2;
+                frame_wrap_r <= flen_one_s2;
+                rx_start_event_r <= rxa_one_s2; rx_stop_event_r <= rxo_one_s2;
+                tx_start_event_r <= txa_one_s2; tx_stop_event_r <= txo_one_s2;
             end else begin
                 frame_cnt <= frame_cnt + 32'd1;
+                if (rx_start_event_r) in_rx_r <= 1'b1;
+                if (rx_stop_event_r)  in_rx_r <= 1'b0;
+                if (tx_start_event_r) in_tx_r <= 1'b1;
+                if (tx_stop_event_r)  in_tx_r <= 1'b0;
+                frame_wrap_r <= (frame_cnt == flenm2_s2);
+                rx_start_event_r <= (frame_cnt == rxam2_s2);
+                rx_stop_event_r  <= (frame_cnt == rxom2_s2);
+                tx_start_event_r <= (frame_cnt == txam2_s2);
+                tx_stop_event_r  <= (frame_cnt == txom2_s2);
             end
         end
     end
 
-    wire in_rx = tdd_en & (rxo_s2 != 32'd0) & (frame_cnt >= rxa_s2) & (frame_cnt < rxo_s2);
-    wire in_tx = tdd_en & (txo_s2 != 32'd0) & (frame_cnt >= txa_s2) & (frame_cnt < txo_s2);
     assign tdd_sync   = sync_pulse;
-    assign tdd_txnrx  = tdd_drive ? (in_tx ^ tdd_txpol)        : 1'b0;
-    assign tdd_enable = tdd_drive ? ((in_tx | in_rx) ^ tdd_enpol) : 1'b0;
+    assign tdd_txnrx  = (tdd_en && tdd_drive) ? (in_tx_r ^ tdd_txpol) : 1'b0;
+    assign tdd_enable = (tdd_en && tdd_drive) ?
+                        ((in_tx_r | in_rx_r) ^ tdd_enpol) : 1'b0;
 
     // FRAME_POS CDC: Gray-code (changes every cnt_clk), like live_count
     reg [31:0] fgray;
@@ -273,6 +341,13 @@ module pps_counter #(
             s_axi_bresp <= 0; ctrl_enable <= 1'b1; ctrl_clear <= 1'b0; ctrl_gpio <= 2'b00;
             tdd_ctrl <= 5'd0; frame_len <= 32'd0;
             rx_start <= 32'd0; rx_stop <= 32'd0; tx_start <= 32'd0; tx_stop <= 32'd0;
+            frame_len_m2 <= 32'hFFFFFFFE;
+            rx_start_m2 <= 32'hFFFFFFFE; rx_stop_m2 <= 32'hFFFFFFFE;
+            tx_start_m2 <= 32'hFFFFFFFE; tx_stop_m2 <= 32'hFFFFFFFE;
+            frame_len_valid <= 0; frame_len_one <= 0;
+            rx_zero_active <= 0; tx_zero_active <= 0;
+            rx_start_one <= 0; rx_stop_one <= 0;
+            tx_start_one <= 0; tx_stop_one <= 0;
         end else begin
             ctrl_clear <= 1'b0;  // auto-clear pulse
             // address latch
@@ -291,11 +366,31 @@ module pps_counter #(
                         ctrl_gpio   <= s_axi_wdata[5:4];
                     end
                     4'h7: tdd_ctrl  <= s_axi_wdata[4:0];  // 0x1C TDD_CTRL
-                    4'h8: frame_len <= s_axi_wdata;       // 0x20 FRAME_LEN
-                    4'h9: rx_start  <= s_axi_wdata;       // 0x24 RX_START
-                    4'hA: rx_stop   <= s_axi_wdata;       // 0x28 RX_STOP
-                    4'hB: tx_start  <= s_axi_wdata;       // 0x2C TX_START
-                    4'hC: tx_stop   <= s_axi_wdata;       // 0x30 TX_STOP
+                    4'h8: begin
+                        frame_len <= s_axi_wdata; frame_len_m2 <= s_axi_wdata - 2;
+                        frame_len_valid <= (s_axi_wdata != 0);
+                        frame_len_one <= (s_axi_wdata == 1);
+                    end
+                    4'h9: begin
+                        rx_start <= s_axi_wdata; rx_start_m2 <= s_axi_wdata - 2;
+                        rx_start_one <= (s_axi_wdata == 1);
+                        rx_zero_active <= (s_axi_wdata == 0) && (rx_stop != 0);
+                    end
+                    4'hA: begin
+                        rx_stop <= s_axi_wdata; rx_stop_m2 <= s_axi_wdata - 2;
+                        rx_stop_one <= (s_axi_wdata == 1);
+                        rx_zero_active <= (rx_start == 0) && (s_axi_wdata != 0);
+                    end
+                    4'hB: begin
+                        tx_start <= s_axi_wdata; tx_start_m2 <= s_axi_wdata - 2;
+                        tx_start_one <= (s_axi_wdata == 1);
+                        tx_zero_active <= (s_axi_wdata == 0) && (tx_stop != 0);
+                    end
+                    4'hC: begin
+                        tx_stop <= s_axi_wdata; tx_stop_m2 <= s_axi_wdata - 2;
+                        tx_stop_one <= (s_axi_wdata == 1);
+                        tx_zero_active <= (tx_start == 0) && (s_axi_wdata != 0);
+                    end
                     default: ;
                 endcase
                 s_axi_bvalid <= 1'b1; s_axi_bresp <= 2'b00;

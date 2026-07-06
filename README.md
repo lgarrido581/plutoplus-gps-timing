@@ -107,7 +107,7 @@ More in [Build details](docs/BUILD.md).
 ### LibreSDR Rev.5
 
 LibreSDR bring-up is deliberately SD-card-only. It needs Docker Desktop, native
-Vivado 2022.2, GNU Make for Windows (the commands below use Cygwin Make), and a
+Vivado 2022.2, GNU Make for Windows, and a
 FAT32 SD card.
 
 ```bash
@@ -124,6 +124,9 @@ bash docker-run.sh --target libresdr --prepare-hdl
 
 The GNU Make bundled with Vitis HLS is shown above; a Cygwin installation such
 as `C:\cygwin64\bin\make.exe` is also supported.
+The build fails unless the AD9361 LVDS receive setup, FPGA input-path, and lane
+skew constraints pass at the maximum 245.76 MHz interface clock. Calibrated
+hold margin is checked on hardware with the packaged `verify_lvds.sh` PRBS test.
 
 ```bash
 # 3. Build Linux, the rootfs, firmware, and staged SD files around that bitstream.

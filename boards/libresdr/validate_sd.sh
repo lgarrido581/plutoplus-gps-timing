@@ -24,7 +24,8 @@ trap 'rm -rf "$TMP"' EXIT
 (
     cd "$TMP"
     gzip -dc "$SD/ramdisk.image.gz" |
-        cpio -id --quiet 'etc' 'etc/*' 'usr' 'usr/bin' 'usr/bin/xo_correct.sh'
+        cpio -id --quiet 'etc' 'etc/*' 'usr' 'usr/bin' \
+            'usr/bin/xo_correct.sh' 'usr/bin/verify_lvds.sh'
 )
 
 ROOT="$TMP"
@@ -49,6 +50,10 @@ grep -Fq 'DEVICES="/dev/ttyUL0"' "$ROOT/etc/init.d/S50gpsd" ||
     fail "gpsd is not configured for ttyUL0"
 grep -Fq 'refclock PPS /dev/pps0' "$ROOT/etc/chrony.conf" ||
     fail "chrony PPS source missing"
+[ -x "$ROOT/usr/bin/verify_lvds.sh" ] ||
+    fail "LibreSDR LVDS hardware acceptance test missing"
+grep -Fq 'bist_timing_analysis' "$ROOT/usr/bin/verify_lvds.sh" ||
+    fail "LibreSDR LVDS test does not run PRBS timing analysis"
 
 dtc -q -I dtb -O dts "$SD/devicetree.dtb" > "$TMP/devicetree.dts" ||
     fail "device tree cannot be decompiled"

@@ -11,6 +11,7 @@ import re
 
 ROOT = Path(sys.argv[1]).resolve()
 ASSETS = Path(sys.argv[2]).resolve()
+BOARD_ASSETS = Path(__file__).resolve().parent
 HDL = ROOT / "hdl/projects/libre"
 
 
@@ -184,18 +185,29 @@ ad_connect gps_tx_reset_or/Res tx_upack/reset""",
 )
 
 shutil.copy2(ASSETS / "pps_counter.v", HDL / "pps_counter.v")
+shutil.copy2(BOARD_ASSETS / "libresdr_lvds_timing.xdc",
+             HDL / "libresdr_lvds_timing.xdc")
+shutil.copy2(BOARD_ASSETS / "validate_lvds_timing.tcl",
+             HDL / "validate_lvds_timing.tcl")
 
-# The LibreSDR 2R2T/filter design is already tight at 100 MHz. The default
-# strategy misses timing in the upstream AD9361 control path after adding the
-# timing peripherals; Performance_Explore gives placer/router permission to
-# replicate and restructure those paths.
+# Keep the upstream implementation strategy. A design-wide Performance_Explore
+# override can move the source-synchronous AD9361 input clock relative to its
+# data paths. Timing closure for the GPS additions must be solved on the actual
+# failing paths, not by changing the routing strategy for the whole design.
 project_tcl = HDL / "system_project.tcl"
 replace(
     project_tcl,
-    "adi_project_files libre [list \\",
-    """set_property strategy Performance_Explore [get_runs impl_1]
-
-adi_project_files libre [list \\""",
+    """  "system_constr.xdc" \\
+  "$ad_hdl_dir/library/common/ad_iobuf.v"]""",
+    """  "system_constr.xdc" \\
+  "libresdr_lvds_timing.xdc" \\
+  "$ad_hdl_dir/library/common/ad_iobuf.v"]""",
+)
+replace(
+    project_tcl,
+    "source $ad_hdl_dir/library/axi_ad9361/axi_ad9361_delay.tcl",
+    """source $ad_hdl_dir/library/axi_ad9361/axi_ad9361_delay.tcl
+source $ad_hdl_dir/projects/libre/validate_lvds_timing.tcl""",
 )
 
 # ---- constraints ----
@@ -211,6 +223,13 @@ set_property -dict {PACKAGE_PIN G15 IOSTANDARD LVCMOS33 PULLDOWN TRUE} [get_port
 set_property -dict {PACKAGE_PIN K14 IOSTANDARD LVCMOS33} [get_ports gps_uart_rx]
 set_property -dict {PACKAGE_PIN J14 IOSTANDARD LVCMOS33} [get_ports gps_uart_tx]
 """,
+)
+replace(
+    xdc,
+    "create_clock -period 8.000 -name rx_clk [get_ports rx_clk_in_p]",
+    """# AD9361 DATA_CLK reaches 245.76 MHz in LVDS 2R2T mode at 61.44 MSPS.
+# The data/frame input delays and duty-cycle margin are in libresdr_lvds_timing.xdc.
+create_clock -period 4.069 -name rx_clk [get_ports rx_clk_in_p]""",
 )
 append_once(
     xdc,
@@ -232,7 +251,13 @@ set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/txa_s1_
 set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/txo_s1_reg*}]
 set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/rxa_s1_reg*}]
 set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/rxo_s1_reg*}]
-set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/tdc_s1_reg*}]""",
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/tdc_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/flenm2_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/rxam2_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/rxom2_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/txam2_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/txom2_s1_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/tdf_s1_reg*}]""",
 )
 
 # ---- Linux ----

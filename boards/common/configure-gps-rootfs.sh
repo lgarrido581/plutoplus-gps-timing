@@ -99,6 +99,9 @@ EOF
 # after that live LUN change. Binding once after S45 makes RNDIS/ACM/MSD/IIO
 # enumerate reliably while leaving the upstream Pluto+ sequence untouched.
 if [ "$BOARD_NAME" = "libresdr" ]; then
+install -m 0755 /build/boards-src/libresdr/verify_lvds.sh \
+    "$OVERLAY/usr/bin/verify_lvds.sh"
+
 # LibreSDR's upstream S40network writes only a DHCP start address. BusyBox
 # udhcpd requires both start and end, otherwise it exits immediately.
 sed -i '/echo "start \$IPADDR_HOST" > \$UDHCPD_CONF/a echo "end $IPADDR_HOST" >> $UDHCPD_CONF' \
