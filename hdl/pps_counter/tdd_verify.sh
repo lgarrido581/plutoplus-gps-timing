@@ -153,7 +153,7 @@ elif [ "$secs" -lt 2 ]; then
     echo "  inconclusive: PPS_SEQ advanced <2 in ${SECS}s (is PPS locked? increase SECS)."
 elif [ "$maxseq" -le "$BOUND" ]; then
     echo "  PASS: FRAME_SEQ stayed bounded (max=$maxseq ~ $EXP_FRAMES) and reset on each PPS"
-    echo "        -> the TDD frame is GPS-anchored. axi_tdd is in ext-sync, so its frame is too."
+    echo "        -> pps_counter's frame is GPS-anchored (this is what the capture path gates on)."
 elif [ "$maxseq" -le $(( EXP_FRAMES * 3 )) ]; then
     echo "  MOSTLY OK: max=$maxseq slightly over $EXP_FRAMES -> an occasional PPS reset is missed"
     echo "        (likely an F20 PPS glitch -> see /var/log/xocorrect.log). Anchored most seconds."
@@ -161,7 +161,8 @@ else
     echo "  FAIL: FRAME_SEQ climbed to $maxseq (>> $EXP_FRAMES) -> NOT resetting on PPS."
     echo "        Check TDD_CTRL.pps_sync_en (bit1) and that real PPS reaches F20."
 fi
-echo "  axi_tdd CONTROL=$ctrl (enable+sync_reset+sync_ext) -> re-anchoring on every pps_tick."
+echo "  axi_tdd CONTROL=$ctrl (enable+sync_reset+sync_ext) DOES re-anchor per pps_tick, but demo only:"
+echo "  sync_reset zeroes it mid-frame -> a runt at the PPS boundary, so captures gate via pps_counter."
 echo "  Software reads are ms-jittery: this proves FUNCTION. For ns/sample precision, scope a TDD"
 echo "  channel output vs PPS, or two-node cross-correlate (Tier 3, see TDD_PPS_DESIGN.md)."
 restore_normal_rx

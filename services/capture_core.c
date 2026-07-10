@@ -42,9 +42,12 @@ static int sysfs_write(const char *name, long long value) {
     return rc;
 }
 
-/* Coincident (PPS-anchored) capture. ADI's axi_tdd frame free-runs vs the GPS 1PPS -- it
- * re-syncs sync_in only ONCE at enable, not per pulse -- so its window drifts and cannot
- * align across nodes. The BD ORs axi_tdd/tdd_channel_1 with pps_counter/tdd_enable into
+/* Coincident (PPS-anchored) capture. With sync_ext ALONE (CONTROL=0x9), ADI's axi_tdd re-syncs
+ * sync_in only ONCE at enable then free-runs -- its window drifts and cannot align across nodes.
+ * (The sync_reset bit, CONTROL=0xB, DOES re-anchor per pulse -- HDL axi_tdd_counter.sv:
+ * `if (tdd_sync && tdd_sync_rst) tdd_counter<=0` -- but it zeroes the counter mid-frame, so a PPS
+ * off a frame boundary makes a runt frame -> truncated capture. So we anchor via pps_counter's
+ * window, which owns the boundary.) The BD ORs axi_tdd/tdd_channel_1 with pps_counter/tdd_enable into
  * the RX-DMA sync (LEVEL: DMA transfers while HIGH); pps_counter resets its frame to 0 on
  * EVERY PPS edge. So for a gated capture we DISABLE axi_tdd -- which forces tdd_channel_1
  * LOW (validated: disabling the core latches ch1 low) -- and let pps_counter own the OR

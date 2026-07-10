@@ -85,16 +85,23 @@ ADI `hdl` tree.
 
 ## As built (coincident capture — supersedes v1.4 Method A)
 
-Live register diagnostics on a running node showed Method A does **not** hold: with
-`pps_tick → axi_tdd/sync_in` wired, `axi_tdd` armed for external sync (`CONTROL=0x9`), an exactly
-1-second frame, and `pps_tick` pulsing every second, the `axi_tdd` window still drifted milliseconds
-and *accumulated*. **ADI's `axi_tdd` re-syncs on `sync_in` only once (at enable), then free-runs on the
-sample clock** — it does not re-anchor on each pulse. So its frame phase drifts vs the GPS second by
-the residual `l_clk`-vs-PPS error and nodes do not agree on window phase.
+Live register diagnostics showed Method A does **not** hold *as first configured*: with
+`pps_tick → axi_tdd/sync_in` wired but `axi_tdd` armed for external sync **without** the `sync_reset`
+bit (`CONTROL=0x9`), an exactly 1-second frame, and `pps_tick` pulsing, the `axi_tdd` window still
+drifted milliseconds and *accumulated*. With `sync_ext` **alone**, ADI's `axi_tdd` re-syncs on
+`sync_in` only once (at enable), then free-runs on the sample clock.
 
-The fix uses **Method B** (`drive_pins`) for the RX gate, because `pps_counter`'s own frame *does*
-reload to 0 on **every** PPS edge (`pps_rise`), so its `tdd_enable` window is GPS-locked by
-construction. To keep free-running streaming RX working, the RX-DMA `sync` becomes the **OR** of both:
+**The `sync_reset` bit *does* change this** — confirmed in HDL (`axi_tdd_counter.sv`):
+`if (tdd_sync && tdd_sync_rst) tdd_counter <= 0`. So with `CONTROL=0xB` (`sync_reset|sync_ext`) every
+`pps_tick` **does** re-anchor the frame. The catch: it zeroes the counter **mid-frame** on each PPS,
+so unless `FRAME_LEN` exactly divides the second it produces a **runt frame** at the PPS boundary — a
+truncated window / short DMA buffer every second. (`tdd_verify.sh` uses `0xB` to *demonstrate* the
+re-anchor; that is not the capture path.)
+
+The capture path therefore uses **Method B** (`drive_pins`) for the RX gate: `pps_counter`'s own frame
+reloads to 0 on **every** PPS edge (`pps_rise`) **and** controls the boundary cleanly (no mid-frame
+runt), so its `tdd_enable` window is GPS-locked by construction. To keep free-running streaming RX
+working, the RX-DMA `sync` becomes the **OR** of both:
 
 ```
 adc_dma/sync = axi_tdd/tdd_channel_1  |  pps_counter/tdd_enable
@@ -129,8 +136,9 @@ A brief PPS dropout does **not** break triggering:
 
 - `pps_counter`'s own frame counter **free-runs** between PPS edges (`frame_wrap` keeps it running) and
   the PPS edge only *reloads* it to 0 — so frames/bursts keep coming during a gap and re-anchor when PPS
-  returns. (ADI's `axi_tdd` frame does **not** re-align on `pps_tick` — see "As built (coincident
-  capture)"; that is why the coincident-capture RX gate is driven from `pps_counter`, not `axi_tdd`.)
+  returns. (ADI's `axi_tdd` frame re-aligns on `pps_tick` only with `sync_reset` (`0xB`), and even then
+  with a mid-frame runt — see "As built (coincident capture)"; that is why the coincident-capture RX
+  gate is driven from `pps_counter`, not `axi_tdd`.)
 - The only effect is loss of re-anchoring: frame phase drifts vs absolute GPS by
   `residual_ppm × gap` (~30 ns per second of gap at the ~0.03 ppm hold). The next PPS snaps it back.
 - The sample clock holds its last `xo_correction` (TCXO runs at the last-disciplined frequency);

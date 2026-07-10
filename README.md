@@ -41,7 +41,7 @@ overlay, Vivado 2022.2 build, and SD-card artifacts.
 | **Read-only telemetry over ZMQ** | `pluto_zmqd` serves timing/GPS/RF/DMA so a client can read node state **without root SSH** — autostarts at boot. See [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) |
 | **GPS-anchored capture over ZMQ** | `pluto_ctld` tunes + captures PPS-gated IQ → a SigMF pair stamped with the measured GPS time of sample 0 (for multi-node TDOA) — autostarts at boot. See [capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) |
 | **GPS‑disciplined sample clock** *(`--hwlatch`)* | FPGA `pps_counter` + `xo_correct.sh` lock the AD936x sample clock to GPS for `xo_correction`/TDOA — see [FPGA counter](hdl/pps_counter/README.md) |
-| **GPS‑aligned TDD** *(`--hwlatch`, v1.4)* | `pps_counter` emits a PPS‑edge `pps_tick` that re‑anchors ADI's `axi_tdd` frame each GPS second → TX/RX windows phase‑locked to GPS across nodes. Verify with `tdd_verify.sh`; design in [PPS‑aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) |
+| **GPS‑aligned TDD / coincident capture** *(`--hwlatch`)* | `pps_counter`'s frame counter reloads on every PPS edge and gates the RX‑DMA window → captures open on a common GPS edge across nodes. (ADI's `axi_tdd` re‑anchors per pulse only with `sync_reset`, and then mid‑frame — so the capture gates on `pps_counter`, not `axi_tdd`.) Verify with `tdd_verify.sh`; design in [PPS‑aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) |
 
 **Two build variants:** the **base** firmware (`bash docker-run.sh`, no Vivado) gives everything above
 except the FPGA counter; the **`--hwlatch`** firmware adds the sample‑clock counter + auto‑discipline
@@ -222,9 +222,9 @@ scp hdl/pps_counter/tdd_verify.sh root@pluto.local:/tmp/   # password: analog
 ssh root@pluto.local 'sh /tmp/tdd_verify.sh'
 # -> PASS: FRAME_SEQ bounded 0..~100 and resets each PPS; axi_tdd CONTROL=0xB
 ```
-It proves *function* (clock locked, frame re-anchors on PPS, `axi_tdd` consuming `pps_tick`). Software
-reads are ms-jittery, so for nanosecond/sample precision scope a TDD channel vs PPS or two-node
-cross-correlate — see [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md).
+It proves *function* (clock locked, `pps_counter`'s frame re-anchors on PPS — that's what GPS-gated
+captures gate on). Software reads are ms-jittery, so for nanosecond/sample precision scope a TDD
+channel vs PPS or two-node cross-correlate — see [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md).
 
 **No fix?** Almost always antenna/reception (SNR ≈ 0 = antenna not really receiving) — see
 [Gotchas](docs/GOTCHAS.md). Serving NTP to other machines is covered in [NTP](docs/NTP.md).
