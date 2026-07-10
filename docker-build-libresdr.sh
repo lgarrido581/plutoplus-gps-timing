@@ -46,6 +46,156 @@ git -C linux apply "$PORT/patches/linux.diff"
 git -C u-boot-xlnx apply "$PORT/patches/u-boot-xlnx.diff"
 git -C buildroot apply "$PORT/patches/buildroot.diff"
 
+# LibreSDR Rev.5 boards seen in the field use a Winbond W25Q256JV 256-Mbit
+# QSPI NOR. The Zynq-7000 QSPI controller driver in this ADI/Xilinx kernel only
+# supports 3-byte address phases, so Linux relies on the SPI-NOR core's
+# Extended Address Register (EAR) path above 16 MiB. The inherited Xilinx EAR
+# helpers know AMD/Micron/Macronix/PMC, but not Winbond. The symptom is:
+#
+#   spi-nor spi1.0: failed to read ear reg
+#
+# and writes that cross the 16 MiB boundary can wrap/corrupt lower flash
+# addresses. Winbond uses RDEAR=0xc8 and WREAR=0xc5, the same opcodes already
+# named SPINOR_OP_RDEAR/SPINOR_OP_WREAR here; add manufacturer 0xef to this
+# legacy helper path and require write-enable before WREAR.
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("linux/drivers/mtd/spi-nor/core.c")
+text = path.read_text()
+old_write = """\tif (nor->jedec_id == CFI_MFR_ST ||
+\t    nor->jedec_id == CFI_MFR_MACRONIX ||
+\t    nor->jedec_id == CFI_MFR_PMC) {
+\t\tspi_nor_write_enable(nor);
+\t\tcode = SPINOR_OP_WREAR;
+\t}
+"""
+new_write = """\tif (nor->jedec_id == CFI_MFR_ST ||
+\t    nor->jedec_id == CFI_MFR_MACRONIX ||
+\t    nor->jedec_id == CFI_MFR_PMC ||
+\t    nor->jedec_id == 0xef /* Winbond */) {
+\t\tspi_nor_write_enable(nor);
+\t\tcode = SPINOR_OP_WREAR;
+\t}
+"""
+old_read = """\telse if (nor->jedec_id == CFI_MFR_ST ||
+\t\t nor->jedec_id == CFI_MFR_MACRONIX ||
+\t\t nor->jedec_id == CFI_MFR_PMC)
+\t\tcode = SPINOR_OP_RDEAR;
+"""
+new_read = """\telse if (nor->jedec_id == CFI_MFR_ST ||
+\t\t nor->jedec_id == CFI_MFR_MACRONIX ||
+\t\t nor->jedec_id == CFI_MFR_PMC ||
+\t\t nor->jedec_id == 0xef /* Winbond */)
+\t\tcode = SPINOR_OP_RDEAR;
+"""
+for old, new, label in (
+    (old_write, new_write, "Winbond WREAR"),
+    (old_read, new_read, "Winbond RDEAR"),
+):
+    if old not in text:
+        raise SystemExit(f"expected SPI-NOR EAR anchor missing: {label}")
+    text = text.replace(old, new, 1)
+path.write_text(text)
+print("Patched Linux SPI-NOR EAR helpers for Winbond W25Q256 on Zynq QSPI")
+PY
+
+# LibreSDR Rev.5's DFU button is PS_MIO12, pulled up and active-low. The
+# upstream Pluto environment checks GPIO14, which is not the LibreSDR button.
+# On LibreSDR, MIO14/MIO15 are FTDI debug UART TX/RX, MIO11 is USB overcurrent,
+# MIO9 is Ethernet PHY reset, and MIO10 is believed to be Ethernet PHY INT.
+# Patch U-Boot's built-in default environment before building u-boot.elf; the
+# staged uEnv.txt is checked and patched again below as a guard. The inherited
+# Pluto dfu_sf also toggles GPIO15; remove that because GPIO15 is LibreSDR's
+# FTDI debug UART pair. The preboot check is required because the qspiboot-only
+# check is not evaluated on SD boot.
+python3 - <<'PY'
+from pathlib import Path
+
+root = Path("u-boot-xlnx")
+dfu_check = (
+    "gpio input 12 && set stdout serial@e0000000 && sf probe && "
+    "sf protect lock 0 100000 && run dfu_sf;"
+)
+
+gpio14_hits = 0
+preboot_hits = 0
+serial_hits = 0
+gpio15_hits = 0
+maxcpus_hits = 0
+plutoreva_hits = 0
+bootargs_hits = 0
+
+def patch_preboot(text: str) -> tuple[str, int]:
+    hits = 0
+    out = []
+    for line in text.splitlines(keepends=True):
+        if (
+            "preboot=" in line
+            and "sd_uEnvtxt_existence_test" in line
+            and dfu_check not in line
+        ):
+            line = line.replace("preboot=", f"preboot={dfu_check} ", 1)
+            hits += 1
+        out.append(line)
+    return "".join(out), hits
+
+for path in root.rglob("*"):
+    if not path.is_file():
+        continue
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError:
+        continue
+
+    new = text
+    if "gpio input 14" in new:
+        gpio14_hits += 1
+        new = new.replace("gpio input 14", "gpio input 12")
+    if (
+        "serial@e0001000" in new
+        and any(marker in new for marker in ("dfu_sf=", "qspiboot=", "preboot="))
+    ):
+        serial_hits += 1
+        new = new.replace("serial@e0001000", "serial@e0000000")
+    if "dfu_sf=" in new and ("gpio set 15;" in new or ";gpio clear 15" in new):
+        gpio15_hits += 1
+        new = new.replace("dfu_sf=gpio set 15;", "dfu_sf=")
+        new = new.replace(";gpio clear 15", "")
+    if "maxcpus=1" in new and any(marker in new for marker in ("qspiboot=", "maxcpus=")):
+        maxcpus_hits += 1
+        new = new.replace("maxcpus=1", "maxcpus=2")
+    if "test -n $PlutoRevA || gpio input 12" in new:
+        plutoreva_hits += 1
+        new = new.replace("test -n $PlutoRevA || gpio input 12", "gpio input 12")
+    if (
+        "setenv bootargs console=ttyPS0,115200" in new
+        and "cpuidle.off=1" not in new
+    ):
+        bootargs_hits += 1
+        new = new.replace(
+            'clk_ignore_unused uboot="${uboot-version}"',
+            'clk_ignore_unused cpuidle.off=1 '
+            'uio_pdrv_genirq.of_id=uio_pdrv_genirq uboot="${uboot-version}"',
+        )
+    new, hits = patch_preboot(new)
+    preboot_hits += hits
+
+    if new != text:
+        path.write_text(new)
+
+if gpio14_hits == 0:
+    raise SystemExit("expected Pluto DFU GPIO14 check is missing from U-Boot sources")
+if preboot_hits == 0:
+    raise SystemExit("expected U-Boot preboot environment was not patched")
+print(
+    f"Patched LibreSDR U-Boot DFU env: gpio14 files={gpio14_hits}, "
+    f"preboot files={preboot_hits}, serial files={serial_hits}, "
+    f"gpio15 files={gpio15_hits}, maxcpus files={maxcpus_hits}, "
+    f"PlutoRevA files={plutoreva_hits}, bootargs files={bootargs_hits}"
+)
+PY
+
 python3 /build/boards-src/libresdr/apply_overlay.py "$FW" /build/hdl-src/pps_counter
 
 if [ "${PREPARE_HDL:-0}" = 1 ]; then
@@ -86,6 +236,70 @@ info "Building LibreSDR kernel, DTB, rootfs, U-Boot and FIT firmware"
 make -j"$(nproc)" \
     build/zImage build/zynq-libre.dtb build/rootfs.cpio.gz \
     build/u-boot.elf build/uboot-env.txt
+
+# Legacy U-Boot's `gpio input` returns the pin value as the shell status, so a
+# low/pressed active-low button makes `gpio input 12 && ...` take the DFU path.
+sed -i 's/gpio input 14/gpio input 12/g; s/serial@e0001000/serial@e0000000/g' \
+    build/uboot-env.txt
+sed -i 's/dfu_sf=gpio set 15;/dfu_sf=/g; s/;gpio clear 15//g' \
+    build/uboot-env.txt
+sed -i 's/^maxcpus=1$/maxcpus=2/' build/uboot-env.txt
+sed -i 's/test -n \$PlutoRevA || gpio input 12/gpio input 12/g' \
+    build/uboot-env.txt
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("build/uboot-env.txt")
+text = path.read_text()
+dfu_check = (
+    "gpio input 12 && set stdout serial@e0000000 && sf probe && "
+    "sf protect lock 0 100000 && run dfu_sf;"
+)
+lines = []
+for line in text.splitlines(keepends=True):
+    if (
+        line.startswith("preboot=")
+        and "sd_uEnvtxt_existence_test" in line
+        and dfu_check not in line
+    ):
+        line = line.replace("preboot=", f"preboot={dfu_check} ", 1)
+    if line.startswith(("qspiboot=", "qspiboot_verbose=", "ramboot_verbose=")):
+        line = line.replace(
+            'clk_ignore_unused uboot="${uboot-version}"',
+            'clk_ignore_unused cpuidle.off=1 '
+            'uio_pdrv_genirq.of_id=uio_pdrv_genirq uboot="${uboot-version}"',
+        )
+    lines.append(line)
+text = "".join(lines)
+path.write_text(text)
+PY
+grep -Fq 'gpio input 12 && set stdout' build/uboot-env.txt ||
+    die "LibreSDR DFU button GPIO patch is missing from build/uboot-env.txt"
+if grep -Fq 'gpio input 14 && set stdout' build/uboot-env.txt; then
+    die "Pluto GPIO14 DFU button check leaked into build/uboot-env.txt"
+fi
+grep -Fq 'preboot=' build/uboot-env.txt &&
+    grep -Fq 'gpio input 12 && set stdout serial@e0000000' build/uboot-env.txt ||
+    die "LibreSDR DFU button preboot check is missing from build/uboot-env.txt"
+if grep -Fq 'serial@e0001000' build/uboot-env.txt; then
+    die "Pluto UART1 console leaked into LibreSDR U-Boot environment"
+fi
+if grep -Eq 'gpio (set|clear) 15' build/uboot-env.txt; then
+    die "Pluto GPIO15 DFU indicator leaked into LibreSDR U-Boot environment"
+fi
+if grep -Fq 'PlutoRevA' build/uboot-env.txt; then
+    die "PlutoRevA conditional leaked into LibreSDR U-Boot environment"
+fi
+grep -Fxq 'maxcpus=2' build/uboot-env.txt ||
+    die "LibreSDR U-Boot environment must keep both Zynq-7020 CPUs online"
+if grep -Fxq 'maxcpus=1' build/uboot-env.txt; then
+    die "Pluto single-CPU maxcpus setting leaked into LibreSDR U-Boot environment"
+fi
+grep -Fq 'cpuidle.off=1' build/uboot-env.txt ||
+    die "LibreSDR U-Boot bootargs dropped cpuidle.off=1 from the known-good env"
+grep -Fq 'uio_pdrv_genirq.of_id=uio_pdrv_genirq' build/uboot-env.txt ||
+    die "LibreSDR U-Boot bootargs dropped the known-good UIO platform-driver binding"
+
 touch build/system_top.bit
 make -j"$(nproc)" build/libre.frm build/libre.dfu
 

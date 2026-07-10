@@ -21,6 +21,8 @@ overlay, Vivado 2022.2 build, and SD-card artifacts.
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
 [Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
 [LibreSDR target](docs/LIBRESDR.md) ·
+[LibreSDR QSPI](docs/LIBRESDR_QSPI.md) ·
+[LibreSDR recovery](docs/LIBRESDR_RECOVERY.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
 [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) · [ZMQ API ICD](docs/PLUTO_ZMQ_ICD.md) · [ZMQ capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
@@ -142,6 +144,19 @@ bash docker-run.sh --target libresdr \
 Copy the **contents** of `output/libresdr-sd/` to the FAT32 SD-card root.
 Keep the known-good upstream card available for recovery and do not write QSPI
 during bring-up.
+
+After that SD image passes the complete hardware acceptance checklist, future
+LibreSDR updates can be promoted to QSPI over SSH:
+
+```powershell
+python -m pip install paramiko
+python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+```
+
+The QSPI helper writes only `output/libre.frm` to the firmware/FIT partition; it
+does not overwrite the FSBL, U-Boot, or U-Boot environment. See
+[LibreSDR QSPI flashing](docs/LIBRESDR_QSPI.md) and keep the
+[LibreSDR recovery ladder](docs/LIBRESDR_RECOVERY.md) handy.
 
 > **Do not reuse a stale bitstream after an HDL change.** Changes to
 > `hdl/pps_counter/`, `boards/libresdr/apply_overlay.py`, or FPGA capture/TDD

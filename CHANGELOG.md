@@ -28,6 +28,30 @@
   gate uses registered boundary events to remove its long 32-bit range path,
   with a behavioral regression for window equivalence. `verify_lvds.sh`
   captures the hardware PRBS timing eye plus a bounded two-channel RX sample.
+- Added a guarded LibreSDR QSPI promotion flow. `flash_libresdr_qspi.py` writes
+  only `output/libre.frm` to the firmware/FIT MTD partition after board identity,
+  MTD layout, transfer hash, and optional `verify_lvds.sh` checks. Documentation
+  now separates first SD bring-up from post-validation QSPI updates.
+- Began documenting the LibreSDR recovery ladder: SSH firmware recovery, DFU,
+  SD-card fallback, and FTDI/JTAG last-resort access, with unvalidated
+  bootloader-write paths kept out of the normal QSPI workflow.
+- Patched LibreSDR's generated U-Boot environment for the board's active-low
+  DFU button on `PS_MIO12_500`/GPIO12 instead of Pluto's GPIO14 check. The
+  check now runs from U-Boot `preboot` so SD boot evaluates it too. The staged
+  SD validator rejects a LibreSDR image that still contains the Pluto GPIO14 or
+  UART1 DFU-button path.
+- Added a guarded QSPI bootloader/env path: `finalize-libresdr-qspi.ps1`
+  generates a partition-sized `BOOT-qspi.bin` and `uboot-env.bin`, and
+  `flash_libresdr_qspi_boot.py` backs up existing QSPI boot partitions before
+  any explicit bootloader/env write.
+- Fixed the LibreSDR Rev.5 QSPI/USB promotion path on hardware: device trees now
+  declare the board's Winbond W25Q256 flash, the legacy Linux SPI-NOR EAR helper
+  handles Winbond high-address writes, USB is forced to peripheral mode, the
+  generated environment keeps both Zynq-7020 CPUs online with `maxcpus=2`, and
+  rootfs startup pins `iiod` to CPU0 as a guard against older single-core
+  environments. A rebuilt image was flashed to QSPI and reboot-verified with
+  both CPUs online, configured USB gadget, running `iiod`, and clean W25Q256
+  detection.
 
 All notable changes to this project. Versions are git tags.
 

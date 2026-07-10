@@ -7,6 +7,7 @@ src-cache/
 # Downloaded host tools (e.g. dfu-util binaries) — see README for how to fetch
 tools/*
 !tools/*.ps1
+!tools/make-uboot-env.py
 
 # Exported/generated LibreSDR Vivado workspace
 output/libresdr-hdl/
@@ -21,6 +22,9 @@ __pycache__/
 
 # Logs
 *.log
+build-*.out
+build-*.err
+build-*.pid
 
 # Local scratch backups (e.g. CHANGELOG_backup.md) — not part of the repo
 *_backup.md

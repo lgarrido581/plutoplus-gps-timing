@@ -15,6 +15,33 @@ for name in boot.bif fsbl.elf system_top.bit u-boot.elf uImage \
     [ -s "$SD/$name" ] || fail "missing or empty $name"
 done
 
+grep -Fq 'gpio input 12 && set stdout serial@e0000000' "$SD/uEnv.txt" ||
+    fail "LibreSDR DFU button does not use active-low PS_MIO12/GPIO12"
+grep -Fq 'preboot=' "$SD/uEnv.txt" &&
+    grep -Fq 'gpio input 12 && set stdout serial@e0000000' "$SD/uEnv.txt" ||
+    fail "LibreSDR DFU button is not checked from preboot"
+grep -Fxq 'maxcpus=2' "$SD/uEnv.txt" ||
+    fail "LibreSDR U-Boot environment does not keep both Zynq-7020 CPUs online"
+if grep -Fxq 'maxcpus=1' "$SD/uEnv.txt"; then
+    fail "Pluto single-CPU maxcpus setting leaked into LibreSDR uEnv.txt"
+fi
+if grep -Fq 'gpio input 14 && set stdout' "$SD/uEnv.txt"; then
+    fail "Pluto GPIO14 DFU button check leaked into LibreSDR uEnv.txt"
+fi
+if grep -Fq 'serial@e0001000' "$SD/uEnv.txt"; then
+    fail "Pluto UART1 console leaked into LibreSDR uEnv.txt"
+fi
+if grep -Eq 'gpio (set|clear) 15' "$SD/uEnv.txt"; then
+    fail "Pluto GPIO15 DFU indicator leaked into LibreSDR uEnv.txt"
+fi
+if grep -Fq 'PlutoRevA' "$SD/uEnv.txt"; then
+    fail "PlutoRevA conditional leaked into LibreSDR uEnv.txt"
+fi
+grep -Fq 'cpuidle.off=1' "$SD/uEnv.txt" ||
+    fail "LibreSDR uEnv.txt dropped cpuidle.off=1 from the known-good environment"
+grep -Fq 'uio_pdrv_genirq.of_id=uio_pdrv_genirq' "$SD/uEnv.txt" ||
+    fail "LibreSDR uEnv.txt dropped the known-good UIO platform-driver binding"
+
 gzip -t "$SD/ramdisk.image.gz" || fail "ramdisk gzip integrity check failed"
 mkimage -l "$SD/uImage" >/dev/null || fail "invalid kernel uImage"
 mkimage -l "$SD/uramdisk.image.gz" >/dev/null || fail "invalid ramdisk uImage"
@@ -41,6 +68,11 @@ grep -Fq 'echo "end $IPADDR_HOST" >> $UDHCPD_CONF' "$ROOT/etc/init.d/S40network"
     fail "valid udhcpd end address is not generated"
 grep -Fq '# Deferred to S46udc-bind on LibreSDR' "$ROOT/etc/init.d/S23udc" ||
     fail "early incomplete USB gadget bind is still enabled"
+grep -Fq 'taskset -c 0 /usr/sbin/iiod' "$ROOT/etc/init.d/S23udc" ||
+    fail "IIOD is not pinned to CPU0 for robust LibreSDR USB gadget startup"
+if grep -Fq 'taskset -c 1 /usr/sbin/iiod' "$ROOT/etc/init.d/S23udc"; then
+    fail "IIOD is still pinned to nonexistent CPU1"
+fi
 grep -Fq 'echo ci_hdrc.0 > "$G/UDC"' "$ROOT/etc/init.d/S46udc-bind" ||
     fail "post-MSD USB gadget bind is missing"
 if grep -Fq '/etc/init.d/S41network restart' "$ROOT/etc/init.d/S46udc-bind"; then
@@ -67,5 +99,13 @@ grep -Fq 'pps-counter@7c460000' "$TMP/devicetree.dts" ||
     fail "PPS counter DT node missing"
 grep -Fq 'pps-gpio' "$TMP/devicetree.dts" ||
     fail "Linux PPS GPIO node missing"
+grep -Eq 'compatible = "w25q256(\\0|", ")[^"]*jedec,spi-nor";' "$TMP/devicetree.dts" ||
+    fail "LibreSDR QSPI NOR is not declared as W25Q256"
+grep -Fq 'dr_mode = "peripheral";' "$TMP/devicetree.dts" ||
+    fail "LibreSDR USB controller is not forced to peripheral/gadget mode"
+if grep -Fq 'n25q256a' "$TMP/devicetree.dts" ||
+   grep -Fq 'n25q512a' "$TMP/devicetree.dts"; then
+    fail "Micron N25Q QSPI compatible leaked into LibreSDR device tree"
+fi
 
 echo "[INFO] LibreSDR staged SD artifacts passed offline validation"

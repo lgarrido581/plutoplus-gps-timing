@@ -113,6 +113,13 @@ sed -i '/echo "start \$IPADDR_HOST" > \$UDHCPD_CONF/a echo "end $IPADDR_HOST" >>
 sed -i 's|^[[:space:]]*echo ci_hdrc\.0 > \$GADGET/UDC$|# Deferred to S46udc-bind on LibreSDR|' \
     "$ROOTFS_BOARD_DIR/S23udc"
 
+# Keep IIOD robust if an older/single-core QSPI environment is still installed.
+# The preferred LibreSDR environment sets `maxcpus=2`, matching the Zynq-7020,
+# but a temporary regression to `maxcpus=1` made the inherited Pluto
+# `taskset -c 1` fail and left FunctionFS IIO unready.
+sed -i 's|taskset -c 1 /usr/sbin/iiod|taskset -c 0 /usr/sbin/iiod|' \
+    "$ROOTFS_BOARD_DIR/S23udc"
+
 cat > "$OVERLAY/etc/init.d/S46udc-bind" <<'EOF'
 #!/bin/sh
 G=/sys/kernel/config/usb_gadget/composite_gadget

@@ -162,8 +162,33 @@ The target is not considered hardware validated until a cold SD boot passes
 Ethernet, both RX channels, TX, GPS/chrony, sample-clock discipline, TDD capture,
 and both ZMQ services.
 
+## QSPI promotion after SD validation
+
+Once the SD-booted image has passed the checklist above, you can promote the
+same firmware to QSPI and stop rewriting SD cards for normal updates:
+
+```powershell
+python -m pip install paramiko
+python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+```
+
+The helper flashes `output/libre.frm` to the firmware/FIT MTD partition only.
+It verifies the transfer on the board before writing, refuses bootloader/env
+partitions, reboots, and performs a quick IIO/PPS smoke check. It does not write
+`BOOT.bin`, FSBL, U-Boot, or the U-Boot environment.
+
+See [`LIBRESDR_QSPI.md`](LIBRESDR_QSPI.md) for the full safety notes and
+options such as `--no-reboot`. Read
+[`LIBRESDR_RECOVERY.md`](LIBRESDR_RECOVERY.md) before the first QSPI experiment.
+
 ## Recovery
 
-Remove the SD card and boot the previously known-good LibreSDR card. The workflow
-above never writes QSPI. Retain a copy of the upstream
-`baseclock_cpu750_ddr525` SD image before testing.
+For SD-only testing, remove the SD card and boot the previously known-good
+LibreSDR card. Retain a copy of the upstream `baseclock_cpu750_ddr525` SD image
+before testing.
+
+If a QSPI-promoted firmware does not boot, recover with the known-good SD card or
+U-Boot/DFU path. The QSPI promotion helper writes only the firmware partition, so
+the bootloader should remain intact unless it was already damaged or a separate
+bootloader write was attempted. The detailed recovery ladder is in
+[`LIBRESDR_RECOVERY.md`](LIBRESDR_RECOVERY.md).

@@ -273,6 +273,24 @@ set_kconfig(cfg, {
 })
 
 dtsi = ROOT / "linux/arch/arm/boot/dts/zynq-libre.dtsi"
+replace(
+    dtsi,
+    'compatible = "n25q256a", "n25q512a", "jedec,spi-nor"; /* same as S25FL256 */',
+    # LibreSDR Rev.5 has a Winbond W25Q256 256-Mbit QSPI NOR. The inherited
+    # LibreSDR port declared a Micron N25Q part, which makes Linux report
+    # "found w25q256, expected n25q256a" and was observed to corrupt writes
+    # through the Linux MTD path after a successful erase.
+    'compatible = "w25q256", "jedec,spi-nor";',
+)
+replace(
+    dtsi,
+    '\tdr_mode = "otg";',
+    # LibreSDR is used as a Pluto-style USB gadget. Leaving this in OTG mode
+    # lets cable/ID-pin state push ci_hdrc into host role, which makes configfs
+    # gadget binding fail with -ENODEV:
+    #   configfs-gadget ci_hdrc.0: failed to start composite_gadget: -19
+    '\tdr_mode = "peripheral";',
+)
 append_once(
     dtsi,
     "gps_uart: serial@40600000",
@@ -311,6 +329,18 @@ append_once(
 			status = "okay";
 		};
 };""",
+)
+
+uboot_dts = ROOT / "u-boot-xlnx/arch/arm/dts/zynq-libre-sdr.dts"
+replace(
+    uboot_dts,
+    'compatible = "n25q512a","micron,m25p80";',
+    'compatible = "w25q256", "jedec,spi-nor";',
+)
+replace(
+    uboot_dts,
+    '\tdr_mode = "host";',
+    '\tdr_mode = "peripheral";',
 )
 
 print("LibreSDR GPS timing overlay applied")
