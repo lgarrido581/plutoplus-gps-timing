@@ -87,7 +87,7 @@ def main():
         print("[*] --no-reboot: not rebooting. Reboot the board to boot the new firmware.")
         c.close(); return
 
-    # 4. reboot + verify it came back and RX works
+    # 4. reboot + verify it came back, timing is live, and RX-DMA telemetry is OK
     print("[*] rebooting...")
     try: c.exec_command("sync; (sleep 1; /sbin/reboot) &", timeout=5)
     except Exception: pass
@@ -101,13 +101,36 @@ def main():
     if not c:
         sys.exit("[!] board did not come back in time. Check power; it may be at a "
                  "different address. (FSBL/u-boot intact -> DFU recovery available.)")
-    run(c, "iio_attr -d cf-ad9361-lpc sync_start_enable disarm >/dev/null 2>&1; rm -f /tmp/_rx")
-    run(c, "iio_readdev -b 8192 -s 8192 cf-ad9361-lpc voltage0 voltage1 >/tmp/_rx 2>/dev/null", timeout=12)
-    nb = run(c, "wc -c < /tmp/_rx").strip(); run(c, "rm -f /tmp/_rx")
+    # Health: board is back, timing hardware is LIVE (PPS advancing), and the
+    # telemetry service is up. RX is intentionally NOT probed with a free-running
+    # iio_readdev -- this design DMA-starts the RX buffer off the TDD channel, so a
+    # bare read starves and false-alarms. The authoritative RX-DMA health is
+    # pluto_zmqd's dma.rx_ok (below), which reflects the real capture path.
     print(f"[*] back up: {run(c, 'uptime').strip()}")
-    print(f"[*] pps_present={run(c, 'devmem 0x7C460008 32').strip()}  RX={nb} bytes "
-          f"({'OK' if nb=='32768' else 'CHECK'})")
+    present = run(c, "devmem 0x7C460008 32").strip()
+    pps0 = run(c, "devmem 0x7C460018 32").strip()
+    time.sleep(2)
+    pps1 = run(c, "devmem 0x7C460018 32").strip()
+    zmqd = run(c, "ps 2>/dev/null | grep -q '[p]luto_zmqd' && echo up || echo down").strip()
+    print(f"[*] pps_present={present}  pps_advancing={pps0 != pps1} ({pps0}->{pps1})  "
+          f"pluto_zmqd={zmqd}")
     c.close()
+
+    # RX-DMA health via pluto_zmqd telemetry (authoritative for this DMA-start
+    # capture path). Needs pyzmq on the host; degrades gracefully if absent.
+    try:
+        import zmq, json
+        ctx = zmq.Context(); s = ctx.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, 4000); s.setsockopt(zmq.LINGER, 0)
+        s.connect(f"tcp://{host}:5561"); s.send_string("dma")
+        dma = json.loads(s.recv()).get("dma", {})
+        ok = dma.get("rx_ok")
+        print(f"[*] dma.rx_ok={ok}  last_error={dma.get('last_error')}  "
+              f"({'OK' if ok else 'CHECK'})")
+        s.close(); ctx.term()
+    except Exception as e:
+        print(f"[*] RX-DMA: query pluto_zmqd :5561 'dma' for rx_ok "
+              f"(pyzmq unavailable: {type(e).__name__})")
     print("[*] done.")
 
 
