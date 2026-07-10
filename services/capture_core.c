@@ -16,9 +16,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
 #include <iio.h>
 
-#define LCLK_MAX_HZ 61440000.0   /* AD9361 interface data-clock ceiling (1R1T max rate) */
+#define LCLK_FALLBACK_HZ 122880000.0 /* accepts LibreSDR's validated 4x l_clk */
+#define PLUTO_LCLK_MAX_HZ 61440000.0
+#define LIBRE_LCLK_MAX_HZ 122880000.0
+#define TDD_V2_PATH "/sys/bus/platform/devices/7c440000.tdd"
 #define ARM_LEAD_S  0.35         /* arm the RX DMA this long before t0 so it catches the
                                   * t0 PPS edge. The capture therefore gates on the first
                                   * PPS at/after (t0 - ARM_LEAD_S); used by BOTH the t0
@@ -26,6 +30,17 @@
                                   * sync (a single constant so they cannot drift). */
 
 static struct iio_device *g_tdd = NULL;
+static int g_tdd_v2 = 0;
+
+static int sysfs_write(const char *name, long long value) {
+    char path[256];
+    snprintf(path, sizeof path, "%s/%s", TDD_V2_PATH, name);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    int rc = fprintf(f, "%lld\n", value) < 0 ? -2 : 0;
+    if (fclose(f) != 0 && rc == 0) rc = -3;
+    return rc;
+}
 
 /* Coincident (PPS-anchored) capture. ADI's axi_tdd frame free-runs vs the GPS 1PPS -- it
  * re-syncs sync_in only ONCE at enable, not per pulse -- so its window drifts and cannot
@@ -38,9 +53,13 @@ static struct iio_device *g_tdd = NULL;
  * free-running streaming RX. TDD raw counts are in sample-clock (fs) units. */
 static int configure_tdd(struct iio_context *ctx) {
     g_tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
+    g_tdd_v2 = 0;
+    if (!g_tdd && access(TDD_V2_PATH "/enable", F_OK) == 0) {
+        g_tdd_v2 = 1;
+        return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
+    }
     if (!g_tdd) return -1;
-    iio_device_attr_write(g_tdd, "enable", "0");   /* ch1 -> LOW: yield the RX-DMA OR to pps_counter */
-    return 0;
+    return iio_device_attr_write(g_tdd, "enable", "0");
 }
 
 /* Restore free-running streaming RX WITHOUT a reboot. A gated capture disabled axi_tdd (to
@@ -48,6 +67,19 @@ static int configure_tdd(struct iio_context *ctx) {
  * OR is HIGH again and the RX DMA captures freely, and drop pps_counter's window so only
  * axi_tdd gates streaming. */
 static void restore_rx_mode(long long frame_len, long long rate) {
+    if (g_tdd_v2) {
+        long long flen = frame_len > 1 ? frame_len : rate;
+        sysfs_write("enable", 0);
+        sysfs_write("frame_length_raw", flen - 1);
+        sysfs_write("out_channel1_on_raw", 0);
+        /* One low clock at the frame boundary guarantees the next DMA-start edge. */
+        sysfs_write("out_channel1_off_raw", flen - 1);
+        sysfs_write("out_channel1_polarity", 0);
+        sysfs_write("out_channel1_enable", 1);
+        sysfs_write("enable", 1);
+        pps_ts_disable_frame();
+        return;
+    }
     if (g_tdd) {
         struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
         char b[32];
@@ -98,40 +130,50 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         return fail(out, "ad9361 devices/channels not found");
     }
 
-    /* --- §7 channel-mode rate cap. l_clk = n_active_rx * sample_rate; refuse any
+    /* --- §7 channel-mode rate cap. l_clk = interface_multiple * sample_rate; refuse any
      * requested rate whose l_clk would overrun the AD9361 interface (-> DMA wedge).
-     * Detect n_active from the live counter (PPS_DELTA) vs the current sysfs rate. */
+     * Detect the multiple from the live counter (PPS_DELTA) vs the sysfs rate.
+     * Pluto+ is normally 1x/2x with a 61.44 MHz ceiling; LibreSDR's validated
+     * 2R2T LVDS design is 4x with a 122.88 MHz ceiling. */
     pps_ts_t pps;
-    int have_pps = (pps_ts_init(&pps, LCLK_MAX_HZ) == 0);
+    int have_pps = (pps_ts_init(&pps, LCLK_FALLBACK_HZ) == 0);
     long long cur_rate = 0;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur_rate);
-    int n_active = 2;  /* conservative default = 2R2T (max 30.72 MSPS) */
+    int lclk_multiple = 2;  /* conservative Pluto+ fallback */
     if (have_pps) {
         uint32_t cnt = pps_ts_cnt_hz(&pps);
         if (cnt > 0 && cur_rate > 0) {
             long long r = ((long long)cnt + cur_rate / 2) / cur_rate;  /* round */
-            if (r >= 1 && r <= 2) n_active = (int)r;
+            if (r >= 1 && r <= 4) lclk_multiple = (int)r;
         }
     }
-    double max_rate = LCLK_MAX_HZ / (double)n_active;
+    double lclk_max = lclk_multiple > 2 ? LIBRE_LCLK_MAX_HZ : PLUTO_LCLK_MAX_HZ;
+    double max_rate = lclk_max / (double)lclk_multiple;
+    if (max_rate > 61440000.0) max_rate = 61440000.0; /* AD936x sample-rate limit */
     if ((double)req->rate_hz > max_rate) {
         char m[160];
-        snprintf(m, sizeof m, "sample_rate_hz %lld exceeds %.0f for %dR%dT mode",
-                 req->rate_hz, max_rate, n_active, n_active);
+        snprintf(m, sizeof m, "sample_rate_hz %lld exceeds %.0f for l_clk multiple %d",
+                 req->rate_hz, max_rate, lclk_multiple);
         if (have_pps) pps_ts_close(&pps);
         iio_context_destroy(ctx);
         return fail(out, m);
     }
 
+    /* Prove liveness once per request by observing a new PPS edge. Reuse the
+     * result below so require_gps+tdd_sync does not wait for two edges. */
+    int live_pps = 0;
+    if (have_pps && (req->require_gps || req->tdd_sync))
+        live_pps = pps_ts_live(&pps, 1.5);
+
     /* --require-gps: refuse un-anchored data when a live PPS is demanded. */
-    if (req->require_gps && !(have_pps && pps_ts_present(&pps))) {
+    if (req->require_gps && !live_pps) {
         if (have_pps) pps_ts_close(&pps);
         iio_context_destroy(ctx);
         return fail(out, "not GPS-trusted (pps_present=false)");
     }
 
     /* nominal cnt_clk for this capture's mode (drives xo_ppm + the anchor fallback). */
-    double nominal_cnt = (double)n_active * (double)req->rate_hz;
+    double nominal_cnt = (double)lclk_multiple * (double)req->rate_hz;
     pps.nominal_cnt_hz = nominal_cnt;
 
     /* --- tune RX0: rate + bandwidth + gain on phy voltage0(in), LO on altvoltage0. */
@@ -165,24 +207,29 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     long long frame_len = 0;
     long long off_raw = 0;
     int armed = 0;
+    uint32_t lseq_prev = 0;
 
     if (req->tdd_sync) {
         method = "tdd_pps_window";
         /* GUARD: arming the DMA without a window that WILL open wedges it (reboot to
          * clear). Require a live GPS PPS so pps_counter's PPS-anchored frame runs. */
-        if (!(have_pps && pps_ts_present(&pps))) {
+        if (!live_pps) {
             if (have_pps) pps_ts_close(&pps);
             iio_context_destroy(ctx);
             return fail(out, "tdd_sync needs a live GPS PPS (would wedge the DMA)");
         }
-        frame_len = req->rate_hz;  /* 1 s frame (divides the GPS second, covers a block) */
-        /* pps_counter window [rx_start, rx_stop): rx_start = offset_samples; rx_stop must
-         * cover the offset + whole capture + arm-latency margin and stay inside the frame. */
-        off_raw = req->offset_samples + (long long)req->samples + (long long)(req->samples / 2);
-        if (req->offset_samples < 0 || off_raw >= frame_len) {
+        frame_len = lclk_multiple * req->rate_hz;  /* one GPS second in l_clk counts */
+        /* pps_counter window [on_raw, off_raw): on_raw = offset_samples; off must cover the
+         * offset + whole capture + arm-latency margin and stay inside the frame. */
+        long long on_raw = req->offset_samples * lclk_multiple;
+        off_raw = (req->offset_samples + (long long)req->samples +
+                   (long long)(req->samples / 2)) * lclk_multiple;
+        long long setup_guard_raw = (long long)(nominal_cnt * 0.020);
+        if (req->offset_samples < 0 ||
+            off_raw >= frame_len - setup_guard_raw) {
             char m[160];
-            snprintf(m, sizeof m, "offset(%lld)+capture(%zu)+margin exceeds 1s frame (%lld samp)",
-                     req->offset_samples, req->samples, frame_len);
+            snprintf(m, sizeof m, "offset(%lld)+capture(%zu)+margin leaves <20ms before PPS",
+                     req->offset_samples, req->samples);
             pps_ts_close(&pps);
             iio_context_destroy(ctx);
             return fail(out, m);
@@ -196,7 +243,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
          * AD936x sample clock (== l_clk), so these counts are the same sample units as the
          * axi_tdd path. drive_pins makes tdd_enable output the window; the BD ORs it into
          * the RX-DMA sync -> sample[0] lands on a GPS-locked edge, coincident across nodes. */
-        if (pps_ts_config_frame((uint32_t)frame_len, (uint32_t)req->offset_samples,
+        if (pps_ts_config_frame((uint32_t)frame_len, (uint32_t)on_raw,
                                 (uint32_t)off_raw) != 0) {
             restore_rx_mode(frame_len, req->rate_hz);
             pps_ts_close(&pps);
@@ -204,6 +251,45 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             return fail(out, "pps_counter frame config failed (/dev/mem)");
         }
         iio_context_set_timeout(ctx, 4000);   /* a missed window errors, not hangs */
+
+        /* With an agreed future edge, wait before arming. Arming earlier allows
+         * buffer creation to consume an intervening PPS instead of t0_gps. */
+        if (req->have_t0) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            double now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+            double wait = req->t0_gps - now_s - ARM_LEAD_S;
+            if (wait <= 0.0 || wait >= 60.0) {
+                restore_rx_mode(frame_len, req->rate_hz);
+                pps_ts_close(&pps);
+                iio_context_destroy(ctx);
+                return fail(out, "t0_gps must be 0.35 to 60 seconds in the future");
+            }
+            struct timespec ts;
+            ts.tv_sec = (time_t)wait;
+            ts.tv_nsec = (long)((wait - (double)ts.tv_sec) * 1e9);
+            nanosleep(&ts, NULL);
+        } else {
+            /* Observe one PPS after configuring so the finite window definitely
+             * replaces the normal full-open state. Then let that window close
+             * and arm for the following PPS. */
+            if (!pps_ts_live(&pps, 1.5)) {
+                restore_rx_mode(frame_len, req->rate_hz);
+                pps_ts_close(&pps);
+                iio_context_destroy(ctx);
+                return fail(out, "PPS stopped while preparing TDD capture");
+            }
+            double settle_s = (double)off_raw / nominal_cnt + 0.010;
+            struct timespec ts;
+            ts.tv_sec = (time_t)settle_s;
+            ts.tv_nsec = (long)((settle_s - (double)ts.tv_sec) * 1e9);
+            nanosleep(&ts, NULL);
+        }
+
+        /* Snapshot before the first arm. The old ordering armed here, then took
+         * the snapshot after buffer creation; by then the capture latch had
+         * already fired, forcing every result onto the software fallback. */
+        pps_ts_latch(&pps, NULL, &lseq_prev, NULL);
         if (iio_device_attr_write(rx, "sync_start_enable", "arm") < 0) {
             restore_rx_mode(frame_len, req->rate_hz);
             pps_ts_close(&pps);
@@ -211,23 +297,6 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             return fail(out, "sync_start_enable not settable");
         }
         armed = 1;
-    }
-
-    /* t0_gps scheduling: with an agreed future edge, wait until just before it so every
-     * node (given the same t0_gps) arms ahead of and grabs the SAME PPS-anchored frame
-     * edge. Epoch is the PPS-disciplined CLOCK_REALTIME (same on all nodes); DSN uses
-     * cross-node gps_ns0 differences, so the absolute epoch only has to match. */
-    if (req->tdd_sync && req->have_t0) {
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        double now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
-        double wait = req->t0_gps - now_s - ARM_LEAD_S;   /* arm before the edge */
-        if (wait > 0 && wait < 60.0) {
-            struct timespec ts;
-            ts.tv_sec = (time_t)wait;
-            ts.tv_nsec = (long)((wait - (double)ts.tv_sec) * 1e9);
-            nanosleep(&ts, NULL);
-        }
     }
 
     /* One iio_buffer_refill == ONE DMA block, gap-free internally, bounded by CMA /
@@ -242,6 +311,18 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         return fail(out, "create_buffer failed (CMA / 64 MiB limit -- fewer samples)");
     }
 
+    /* LibreSDR's RX DMA consumes the pre-buffer arm while the buffer is being
+     * created. Re-arm the now-created transfer, but keep lseq_prev from before
+     * the first arm so any capture edge remains detectably fresh. */
+    if (armed && iio_device_attr_write(rx, "sync_start_enable", "arm") < 0) {
+        iio_device_attr_write(rx, "sync_start_enable", "disarm");
+        iio_buffer_destroy(buf);
+        restore_rx_mode(frame_len, req->rate_hz);
+        pps_ts_close(&pps);
+        iio_context_destroy(ctx);
+        return fail(out, "sync_start_enable re-arm failed");
+    }
+
     /* Anchor read just before refill (== sample[0] for the free-running path). */
     pps_anchor_t anchor; memset(&anchor, 0, sizeof anchor);
     if (have_pps) pps_ts_anchor(&pps, &anchor);
@@ -249,12 +330,6 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
         anchor.gps_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
         anchor.cnt_hz = (uint32_t)nominal_cnt; anchor.present = false;
-    }
-
-    uint32_t lseq_prev = 0;
-    if (armed) {
-        pps_ts_latch(&pps, NULL, &lseq_prev, NULL);   /* snapshot to detect THIS capture */
-        iio_device_attr_write(rx, "sync_start_enable", "arm");
     }
 
     ssize_t nbytes = iio_buffer_refill(buf);
@@ -292,7 +367,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             if (cnt < nominal_cnt * 0.5 || cnt > nominal_cnt * 1.5) cnt = nominal_cnt;
             uint64_t last_pps_ns = now_a.gps_ns -
                 (uint64_t)((double)(now_a.live_count - now_a.pps_count) / cnt * 1e9 + 0.5);
-            double frame_ns  = (double)frame_len / fs * 1e9;
+            double frame_ns  = (double)frame_len / (fs * lclk_multiple) * 1e9;
             double offset_ns = (double)req->offset_samples / fs * 1e9;
             double start_approx_ns = (double)now_a.gps_ns - (double)block_ns - offset_ns;
             long long kf = (long long)((start_approx_ns - (double)last_pps_ns) / frame_ns + 0.5);

@@ -5,6 +5,10 @@ a **GPS‑disciplined timing source** — a stratum‑1 NTP server *and* a GPS�
 Built entirely in Docker on [`sardylan/plutoplus`](https://github.com/sardylan/plutoplus) `fw‑0.39`;
 no local Xilinx install is needed for the base firmware.
 
+The repository also has a separate **LibreSDR Rev.5 (Zynq‑7020)** target. It
+shares the timing/services code but uses its own pinned source cache, FPGA
+overlay, Vivado 2022.2 build, and SD-card artifacts.
+
 > ✅ **Verified on hardware.** Stratum‑1, PPS‑disciplined system clock (`chronyc tracking` →
 > `Leap status: Normal`, ref `PPS`, within a few hundred ns of GPS). On the `--hwlatch` build the
 > AD936x **sample clock** is also disciplined to GPS — **−7.77 ppm → +0.02 ppm**.
@@ -16,6 +20,9 @@ no local Xilinx install is needed for the base firmware.
 **Docs:** [Wiring](docs/WIRING.md) · [Verify/NTP serving](docs/NTP.md) · [Gotchas](docs/GOTCHAS.md) ·
 [Build details](docs/BUILD.md) · [FPGA counter](hdl/pps_counter/README.md) ·
 [Metrics](hdl/pps_counter/metrics/README.md) · [TDOA timing impact](docs/TDOA_TIMING.md) ·
+[LibreSDR target](docs/LIBRESDR.md) ·
+[LibreSDR QSPI](docs/LIBRESDR_QSPI.md) ·
+[LibreSDR recovery](docs/LIBRESDR_RECOVERY.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
 [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) · [ZMQ API ICD](docs/PLUTO_ZMQ_ICD.md) · [ZMQ capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
@@ -89,6 +96,8 @@ GPS module → Pluto+ expansion header (map these **MIO numbers** to your board'
 
 ## Build
 
+### Pluto+
+
 ```bash
 bash docker-run.sh                                    # base firmware (no Vivado)
 bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # + FPGA sample-clock counter & discipline
@@ -96,6 +105,67 @@ bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # + FPGA sample-clock coun
 Output lands in `./output/`: **`pluto.frm`** (flash this), `pluto.dfu`, and a release zip. (The host
 `tee` pipeline may print a non‑zero exit even on success — trust the `Done.` line + `output/pluto.frm`.)
 More in [Build details](docs/BUILD.md).
+
+### LibreSDR Rev.5
+
+LibreSDR bring-up is deliberately SD-card-only. It needs Docker Desktop, native
+Vivado 2022.2, GNU Make for Windows, and a
+FAT32 SD card.
+
+```bash
+# 1. Prepare the pinned LibreSDR/PlutoSDR HDL tree with this repo's overlay.
+bash docker-run.sh --target libresdr --prepare-hdl
+```
+
+```powershell
+# 2. Synthesize and route the FPGA image with native Windows Vivado.
+.\tools\build-libresdr-hdl.ps1 `
+  -VivadoRoot C:\Xilinx `
+  -MakeExe C:\Xilinx\Vitis_HLS\2022.2\tps\win64\msys64\mingw64\bin\make.exe
+```
+
+The GNU Make bundled with Vitis HLS is shown above; a Cygwin installation such
+as `C:\cygwin64\bin\make.exe` is also supported.
+The build fails unless the AD9361 LVDS receive setup, FPGA input-path, and lane
+skew constraints pass at the maximum 245.76 MHz interface clock. Calibrated
+hold margin is checked on hardware with the packaged `verify_lvds.sh` PRBS test.
+
+```bash
+# 3. Build Linux, the rootfs, firmware, and staged SD files around that bitstream.
+bash docker-run.sh --target libresdr \
+  --prebuilt-bit output/libresdr-hdl/system_top.bit
+```
+
+```powershell
+# 4. Generate BOOT.bin and SHA256SUMS.txt with Windows bootgen.
+.\tools\finalize-libresdr-sd.ps1 -VivadoRoot C:\Xilinx
+```
+
+Copy the **contents** of `output/libresdr-sd/` to the FAT32 SD-card root.
+Keep the known-good upstream card available for recovery and do not write QSPI
+during bring-up.
+
+After that SD image passes the complete hardware acceptance checklist, future
+LibreSDR updates can be promoted to QSPI over SSH:
+
+```powershell
+python -m pip install paramiko
+python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+```
+
+The QSPI helper writes only `output/libre.frm` to the firmware/FIT partition; it
+does not overwrite the FSBL, U-Boot, or U-Boot environment. See
+[LibreSDR QSPI flashing](docs/LIBRESDR_QSPI.md) and keep the
+[LibreSDR recovery ladder](docs/LIBRESDR_RECOVERY.md) handy.
+
+> **Do not reuse a stale bitstream after an HDL change.** Changes to
+> `hdl/pps_counter/`, `boards/libresdr/apply_overlay.py`, or FPGA capture/TDD
+> wiring require rerunning steps 1 and 2 before the Docker firmware build.
+> `boards/libresdr/validate_sd.sh` validates staged files and device-tree
+> identities, but it cannot prove that an old `.bit` contains the new logic.
+
+The detailed pinout, prerequisites, acceptance checklist, and recovery procedure
+are in [LibreSDR build and bring-up](docs/LIBRESDR.md).
 
 ## Flash (normal update of a working device)
 
@@ -150,7 +220,7 @@ to the Pluto and run it:
 ```sh
 scp hdl/pps_counter/tdd_verify.sh root@pluto.local:/tmp/   # password: analog
 ssh root@pluto.local 'sh /tmp/tdd_verify.sh'
-# -> PASS: FRAME_SEQ bounded 0..~100 and resets each PPS; axi_tdd CONTROL=0x9 (ext-sync)
+# -> PASS: FRAME_SEQ bounded 0..~100 and resets each PPS; axi_tdd CONTROL=0xB
 ```
 It proves *function* (clock locked, frame re-anchors on PPS, `axi_tdd` consuming `pps_tick`). Software
 reads are ms-jittery, so for nanosecond/sample precision scope a TDD channel vs PPS or two-node

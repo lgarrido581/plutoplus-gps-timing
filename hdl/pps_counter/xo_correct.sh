@@ -5,14 +5,16 @@
 # How it works: the hardware latch gives PPS_DELTA = sample-clock counts per GPS
 # second (true 1 Hz from /dev/pps0's source). We compare it to the nominal rate
 # and steer `xo_correction` (the driver's assumed TCXO frequency, in Hz) so the
-# actual sample clock converges to nominal. The board's TCXO is NOT voltage-
-# controlled (dcxo_tune is dead), so this corrects the divider math rather than
-# pulling the crystal - which moves the synthesized sample/LO clocks onto GPS.
+# actual sample clock converges to nominal. This backend corrects the AD936x
+# divider math rather than pulling the crystal. That is required on Pluto+,
+# whose TCXO is not voltage-controlled, and remains the fallback on LibreSDR
+# until its external VCTCXO DAC has a separate control backend.
 #
-# Measured plant (xc7z010 Pluto+, 30.72 MHz): linear, monotonic, repeatable, with
-#   slope ~= -0.767 counts/Hz  (1 count ~= 1.30 Hz of xo_correction, 0.025 ppm/Hz)
-# so a near-deadbeat integral step + a 1-count deadband converges in ~1 update and
-# then holds (no constant re-tuning of the RF datapath).
+# Measured plant: linear, monotonic, and repeatable. Pluto+ measured about
+# 1.30 Hz of xo_correction per count at 30.72 MHz; LibreSDR measured 0.3282
+# Hz/count at 122.88 MHz (= 1.313 Hz/count when normalized to 30.72 MHz).
+# A near-deadbeat integral step converges in about one update. Corrections below
+# the integer-Hz actuator resolution are held without rewriting the RF datapath.
 #
 # NOMINAL is the expected counts/sec = the counter clock (axi_ad9361 l_clk). That is
 # NOT fixed by the bitstream: l_clk = sample_rate x (data-clock multiple), both set at
@@ -41,9 +43,39 @@
 #   sh xo_correct.sh 8          # run 8 update cycles then exit (for testing)
 #   HOLD_GOOD_S=5 HOLD_INVALID_S=60 STATE_FILE=/run/xo_state sh xo_correct.sh
 #   NOMINAL=61440000 sh xo_correct.sh   # pin nominal, skip auto-derive
+#
+# Optional persistent overrides may be placed in /etc/default/xocorrect (or the
+# path in XO_CORRECT_CONFIG).
+[ -r "${XO_CORRECT_CONFIG:-/etc/default/xocorrect}" ] &&
+    . "${XO_CORRECT_CONFIG:-/etc/default/xocorrect}"
 set -u
 
-PHY=/sys/bus/iio/devices/iio:device0
+scale_gain_milli() {
+    gain=$((1313 * 30720000 / $1))
+    [ "$gain" -lt 1 ] && gain=1
+    echo "$gain"
+}
+calc_dxo() {
+    echo $(($1 * $2 / 1000))
+}
+
+# Hardware-free regression check for the rate-scaled gain and integer actuator
+# threshold. Kept in the production script so the tested math cannot drift.
+if [ "${XO_CORRECT_SELFTEST:-0}" = 1 ]; then
+    [ "$(scale_gain_milli 30720000)" = 1313 ]
+    [ "$(scale_gain_milli 122880000)" = 328 ]
+    [ "$(calc_dxo 3 328)" = 0 ]
+    [ "$(calc_dxo 4 328)" = 1 ]
+    [ "$(calc_dxo -4 328)" = -1 ]
+    echo "xo_correct math self-test: PASS"
+    exit 0
+fi
+
+PHY=""
+for d in /sys/bus/iio/devices/iio:device*; do
+    [ "$(cat "$d/name" 2>/dev/null)" = "ad9361-phy" ] && { PHY="$d"; break; }
+done
+[ -n "$PHY" ] || { echo "ERROR: ad9361-phy IIO device not found"; exit 1; }
 XO="$PHY/xo_correction"
 SRATE="$PHY/in_voltage_sampling_frequency"   # live RX sample rate (Hz); l_clk derives from it
 # pluto_ctld drops this while a capture holds the AD9361. Writing xo_correction then
@@ -59,7 +91,15 @@ SEQ=0x7C460018
 NOMINAL_ENV="${NOMINAL:-}"       # if set, pin nominal & skip auto-derive; else derive at startup
 AVG="${AVG:-8}"                  # PPS edges averaged per update (beats ±1-count noise)
 DEADBAND="${DEADBAND:-1}"        # |err| <= this many counts -> hold, don't re-tune
-HZ_PER_CNT_ENV="${HZ_PER_CNT_X100:-}"   # plant-gain override; else scaled from the 30.72M calib
+# Use milli-Hz/count so the LibreSDR 4x-clock case retains enough precision.
+# HZ_PER_CNT_X100 remains accepted for backward compatibility.
+if [ -n "${HZ_PER_CNT_X1000:-}" ]; then
+    HZ_PER_CNT_ENV="$HZ_PER_CNT_X1000"
+elif [ -n "${HZ_PER_CNT_X100:-}" ]; then
+    HZ_PER_CNT_ENV=$((HZ_PER_CNT_X100 * 10))
+else
+    HZ_PER_CNT_ENV=""
+fi
 # Outlier rejection: a trusted delta is NOMINAL ± MAXPPM. A missed/spurious PPS edge
 # makes the latch span multiple seconds -> delta is millions of counts off, which
 # (un-rejected) poisons the average and rails xo_correction. MAXDEV is derived from
@@ -67,11 +107,14 @@ HZ_PER_CNT_ENV="${HZ_PER_CNT_X100:-}"   # plant-gain override; else scaled from 
 MAXPPM="${MAXPPM:-300}"          # |delta-NOMINAL| beyond this many ppm = outlier (TCXO is <±25)
 REJECT_MAX="${REJECT_MAX:-16}"   # outliers tolerated per update before giving up -> hold
 REDERIVE_AFTER="${REDERIVE_AFTER:-3}"  # consecutive all-outlier updates before re-deriving NOMINAL
-XO_MIN=39992000                  # from xo_correction_available
-XO_MAX=40008000
+XO_AVAIL="$PHY/xo_correction_available"
+XO_MIN=$(awk '{gsub(/^\[/, "", $1); print $1}' "$XO_AVAIL" 2>/dev/null)
+XO_MAX=$(awk '{gsub(/\]$/, "", $NF); print $NF}' "$XO_AVAIL" 2>/dev/null)
+case "$XO_MIN" in ''|*[!0-9]*) XO_MIN=39992000 ;; esac
+case "$XO_MAX" in ''|*[!0-9]*) XO_MAX=40008000 ;; esac
 ITERS="${1:-0}"                  # 0 = forever
 # Set by derive_nominal()/recompute_thresholds() below:
-NOMINAL=30720000; MAXDEV=9000; HZ_PER_CNT_X100=130
+NOMINAL=30720000; MAXDEV=9000; HZ_PER_CNT_X1000=1313
 
 # Poll loops below wait for PPS_SEQ to change (once/sec). Without a sleep they
 # fork devmem in a tight loop and peg a CPU core. Use a fractional sleep; fall
@@ -95,7 +138,7 @@ write_state() {  # $1=state  $2=holdover_elapsed_s
     prev_state="$1"
 }
 
-[ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); is this the --hwlatch build with PPS on F20?"; exit 1; }
+[ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); verify the PPS input and FPGA timing build"; exit 1; }
 
 ps=""
 avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
@@ -131,8 +174,8 @@ read_srate() {  # live RX sample rate in Hz (fallback 30.72M if attr missing)
 recompute_thresholds() {  # scale outlier band + plant gain to the current NOMINAL
     MAXDEV=$(( NOMINAL / 1000000 * MAXPPM )); [ "$MAXDEV" -lt 2000 ] && MAXDEV=2000
     # err counts scale with NOMINAL, so Hz-per-count scales as 1/NOMINAL vs the 30.72M calib
-    if [ -n "$HZ_PER_CNT_ENV" ]; then HZ_PER_CNT_X100="$HZ_PER_CNT_ENV"
-    else HZ_PER_CNT_X100=$(( 130 * 30720000 / NOMINAL )); [ "$HZ_PER_CNT_X100" -lt 1 ] && HZ_PER_CNT_X100=1; fi
+    if [ -n "$HZ_PER_CNT_ENV" ]; then HZ_PER_CNT_X1000="$HZ_PER_CNT_ENV"
+    else HZ_PER_CNT_X1000=$(scale_gain_milli "$NOMINAL"); fi
 }
 derive_nominal() {  # NOMINAL = sample_rate x (measured l_clk/rate multiple, snapped to .5/1/2/4)
     S=$(read_srate)
@@ -145,7 +188,7 @@ $((d))"; n=$((n + 1)); else $NAP; fi
     done
     if [ "$n" -lt 3 ]; then
         NOMINAL=${NOMINAL_ENV:-$S}
-        log "WARN: could not measure l_clk (PPS present? STATUS/F20); NOMINAL=$NOMINAL (sample_rate=$S)"
+        log "WARN: could not measure l_clk (PPS present?); NOMINAL=$NOMINAL (sample_rate=$S)"
         recompute_thresholds; return
     fi
     med=$(printf '%s\n' "$raw" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
@@ -167,7 +210,7 @@ PPS_TIMEOUT="${PPS_TIMEOUT:-3}"          # s with no new PPS edge -> declare hol
 HOLD_GOOD_S="${HOLD_GOOD_S:-10}"         # holdover < this -> GOOD; tune from metrics/ ADEV + your TDOA budget
 HOLD_INVALID_S="${HOLD_INVALID_S:-300}"  # holdover >= this -> INVALID (coordinator should drop the node)
 STATE_FILE="${STATE_FILE:-/run/xo_state}"  # the node agent / coordinator reads this
-log "start: NOMINAL=$NOMINAL AVG=$AVG DEADBAND=$DEADBAND MAXDEV=$MAXDEV gain=${HZ_PER_CNT_X100}/100 xo=$(cat $XO)"
+log "start: NOMINAL=$NOMINAL AVG=$AVG DEADBAND=$DEADBAND MAXDEV=$MAXDEV gain=${HZ_PER_CNT_X1000}/1000 xo_range=${XO_MIN}..${XO_MAX} xo=$(cat $XO)"
 c=0; last=""; holdc=0; badstreak=0; holdstart=0; last_delta=NA; last_ppm=NA
 while :; do
     d=$(avg_delta)
@@ -212,28 +255,35 @@ while :; do
     ppm=$(awk "BEGIN{printf \"%+.3f\", $err/($NOMINAL/1000000.0)}")
     last_delta=$d; last_ppm=$ppm
     xo=$(cat $XO)
-    if [ "$ae" -gt "$DEADBAND" ] && capture_active; then
+    dxo=0
+    [ "$ae" -gt "$DEADBAND" ] && dxo=$(calc_dxo "$err" "$HZ_PER_CNT_X1000")
+    if [ "$dxo" -ne 0 ] && capture_active; then
         # A capture holds the AD9361. Writing xo_correction now resets the sample
         # rate mid-DMA and wedges that capture. Hold this cycle; correct after.
         [ "$last" != "caphold" ] && log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> capture active, holding correction"
         last=caphold; holdc=0
-    elif [ "$ae" -gt "$DEADBAND" ]; then
-        # plant slope is NEGATIVE (raising xo lowers delta), so to null err we
-        # step xo the SAME sign as err: dxo = +err * (Hz per count).
-        dxo=$(( err * HZ_PER_CNT_X100 / 100 ))    # Δxo Hz to null err
+    elif [ "$dxo" -ne 0 ]; then
+        # Plant slope is negative (raising xo lowers delta), so step xo in the
+        # same direction as err. Clamp to this device's advertised range.
         nxo=$((xo + dxo))
         [ "$nxo" -lt "$XO_MIN" ] && nxo=$XO_MIN
         [ "$nxo" -gt "$XO_MAX" ] && nxo=$XO_MAX
-        echo "$nxo" > "$XO"
-        log "err=${err}cnt (${ppm}ppm) delta=$d  xo:$xo->$nxo (${dxo}Hz)  -> correcting"
-        write_state CORRECTING 0
-        settle 2
-        last=correct; holdc=0
+        if [ "$nxo" -ne "$xo" ]; then
+            echo "$nxo" > "$XO"
+            log "err=${err}cnt (${ppm}ppm) delta=$d  xo:$xo->$nxo (${dxo}Hz)  -> correcting"
+            write_state CORRECTING 0
+            settle 2
+            last=correct; holdc=0
+        else
+            log "WARN: err=${err}cnt (${ppm}ppm) but xo=$xo is at limit; holding without rewrite"
+            write_state CORRECTING 0
+            last=limit; holdc=0
+        fi
     else
-        # log holds only on the lock transition + a periodic heartbeat, so a
-        # long-running daemon doesn't fill the log every cycle.
+        # The error is inside DEADBAND or below the integer-Hz actuator
+        # resolution. Never rewrite the same value: that can relock the PLL.
         if [ "$last" != "hold" ] || [ $((holdc % HEARTBEAT)) -eq 0 ]; then
-            log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> locked, holding"
+            log "err=${err}cnt (${ppm}ppm) delta=$d  xo=$xo  -> locked, holding (sub-step)"
         fi
         write_state LOCKED 0
         last=hold; holdc=$((holdc + 1))

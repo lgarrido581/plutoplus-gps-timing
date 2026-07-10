@@ -72,8 +72,8 @@ wr $T_FRAMELEN $(( FRAME_LEN - 1 ))  # axi_tdd frame length is (cycles - 1)
 wr $T_CH0_ON  0x0                    # TX window opens at frame start (PPS-anchored edge)
 wr $T_CH0_OFF $(( FRAME_LEN / 2 ))   # ...closes at the half-frame
 wr $T_CHEN    0x1                    # enable channel 0
-wr $T_CONTROL 0x9                    # enable(b0) + sync_ext(b3): frame re-anchors on pps_tick
-echo "  axi_tdd CONTROL=$(rd $T_CONTROL) (expect 0x9)  CH_ENABLE=$(rd $T_CHEN)"
+wr $T_CONTROL 0xB                    # enable + reset-on-sync + external PPS sync
+echo "  axi_tdd CONTROL=$(rd $T_CONTROL) (expect 0xB)  CH_ENABLE=$(rd $T_CHEN)"
 
 echo
 echo "=== now scope it ==="

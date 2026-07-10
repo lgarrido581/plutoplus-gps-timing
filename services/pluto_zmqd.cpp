@@ -80,6 +80,7 @@ static bool g_prev_seq_valid = false;
 static const char* g_advancing = "null";      // "true" | "false" | "null"
 
 static std::string g_node_id = "pluto";
+static std::string g_board_id = "plutoplus";
 
 // latest gpsd reports (raw JSON lines) + their arrival time (monotonic ms)
 static int g_gps_fd = -1;
@@ -496,11 +497,12 @@ static std::string read_uptime_s() {
 }
 
 static std::string build_snapshot() {
-    char hdr[256];
+    char hdr[320];
     snprintf(hdr, sizeof hdr,
              "{\"schema\":\"dsn.health/1\",\"api\":\"dsn.pluto_zmq/1\","
-             "\"node_id\":%s,\"t_unix\":%ld,\"uptime_s\":%s,",
-             json_str(g_node_id).c_str(), (long)time(nullptr), read_uptime_s().c_str());
+             "\"node_id\":%s,\"board\":%s,\"t_unix\":%ld,\"uptime_s\":%s,",
+             json_str(g_node_id).c_str(), json_str(g_board_id).c_str(),
+             (long)time(nullptr), read_uptime_s().c_str());
     std::string out = hdr;
     out += "\"timing\":" + timing_block() + ",";
     out += "\"gps\":" + gps_block() + ",";
@@ -582,6 +584,13 @@ int main(int argc, char** argv) {
 
     char hn[128];
     if (gethostname(hn, sizeof hn) == 0) { hn[sizeof hn - 1] = '\0'; g_node_id = hn; }
+    std::string board_cfg = read_file_trim("/etc/gps-timing-board");
+    size_t board_pos = board_cfg.find("BOARD=");
+    if (board_pos != std::string::npos) {
+        board_pos += 6;
+        size_t board_end = board_cfg.find_first_of("\r\n", board_pos);
+        g_board_id = board_cfg.substr(board_pos, board_end - board_pos);
+    }
 
     timing_init();
     rf_init();

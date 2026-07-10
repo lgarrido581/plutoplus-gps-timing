@@ -1,5 +1,12 @@
 # Flashing a Pluto+ firmware over the network (repeatable)
 
+For LibreSDR QSPI updates after SD validation, use
+[`docs/LIBRESDR_QSPI.md`](docs/LIBRESDR_QSPI.md) and
+`flash_libresdr_qspi.py`. The Pluto+ flow below flashes `output/pluto.frm`;
+LibreSDR flashes `output/libre.frm` with board-specific safety checks. Keep the
+LibreSDR recovery ladder in [`docs/LIBRESDR_RECOVERY.md`](docs/LIBRESDR_RECOVERY.md)
+nearby before the first QSPI experiment.
+
 How to flash a built `output/pluto.frm` to the radio over SSH — no USB mass-storage
 drag-and-drop needed. Validated end-to-end (uptime resets, RX + GPS come back).
 

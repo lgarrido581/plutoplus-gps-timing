@@ -38,6 +38,21 @@ bool pps_ts_present(const pps_ts_t *p) {
     return p->regs && (p->regs[REG_STATUS] & 0x1);
 }
 
+bool pps_ts_live(const pps_ts_t *p, double timeout_seconds) {
+    if (!p->regs || timeout_seconds <= 0.0) return false;
+
+    uint32_t seq = p->regs[REG_PPS_SEQ];
+    struct timespec start, now, pause = { 0, 10000000L }; /* poll at 100 Hz */
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    do {
+        if (p->regs[REG_PPS_SEQ] != seq) return true;
+        nanosleep(&pause, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    } while ((double)(now.tv_sec - start.tv_sec) +
+             (double)(now.tv_nsec - start.tv_nsec) / 1e9 < timeout_seconds);
+    return false;
+}
+
 uint32_t pps_ts_cnt_hz(const pps_ts_t *p) {
     return p->regs ? p->regs[REG_PPS_DELTA] : 0;
 }

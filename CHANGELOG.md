@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased — LibreSDR target
+
+- Added `--target libresdr` alongside the backward-compatible Pluto+ default.
+- Added a pinned LibreSDR v0.38 source overlay for GPS on G15/K14/J14, AXI
+  UART Lite, Linux PPS, `pps_counter`, GPS-synchronized `axi_tdd`, chrony,
+  sample-clock discipline, and the existing ZMQ services.
+- Added a Windows Vivado 2022.2 + Docker SD-card build workflow. LibreSDR
+  bring-up remains SD-only until the hardware acceptance checklist passes.
+- Validated the LibreSDR sample-clock control plant on hardware at 122.88 MHz:
+  `xo_correction` measured −3.047 counter ticks/Hz, or 0.3282 Hz/count. Updated
+  the controller to milli-Hz gain precision and the measured rate-scaled gain.
+- Fixed sub-step errors repeatedly rewriting the same `xo_correction` value and
+  potentially relocking the AD936x PLL. They now report `LOCKED` without a
+  write. XO limits are read from `xo_correction_available` instead of being
+  hard-coded, with optional overrides from `/etc/default/xocorrect`.
+- Integrated main's coincident-PPS capture path: LibreSDR now ORs the normal
+  AXI-TDD streaming gate with `pps_counter/tdd_enable`, preserves its AXI-TDD v2
+  sysfs fallback, and scales PPS-window counts for its measured 4× `l_clk`.
+- Rebuilt the merged LibreSDR FPGA/Linux/SD artifacts with routed timing met and
+  documented the complete workflow in the README. The Windows helper now retries
+  a transient ADI IP-packager failure once, and `SHA256SUMS.txt` uses portable
+  LF line endings so `sha256sum -c` works on Linux and Git Bash.
+- Replaced LibreSDR's design-wide `Performance_Explore` workaround with explicit
+  245.76 MHz source-synchronous AD9361 LVDS constraints. Post-route validation
+  now rejects untimed or failing RX setup/path/skew requirements. The PPS/TDD
+  gate uses registered boundary events to remove its long 32-bit range path,
+  with a behavioral regression for window equivalence. `verify_lvds.sh`
+  captures the hardware PRBS timing eye plus a bounded two-channel RX sample.
+- Added a guarded LibreSDR QSPI promotion flow. `flash_libresdr_qspi.py` writes
+  only `output/libre.frm` to the firmware/FIT MTD partition after board identity,
+  MTD layout, transfer hash, and optional `verify_lvds.sh` checks. Documentation
+  now separates first SD bring-up from post-validation QSPI updates.
+- Began documenting the LibreSDR recovery ladder: SSH firmware recovery, DFU,
+  SD-card fallback, and FTDI/JTAG last-resort access, with unvalidated
+  bootloader-write paths kept out of the normal QSPI workflow.
+- Patched LibreSDR's generated U-Boot environment for the board's active-low
+  DFU button on `PS_MIO12_500`/GPIO12 instead of Pluto's GPIO14 check. The
+  check now runs from U-Boot `preboot` so SD boot evaluates it too. The staged
+  SD validator rejects a LibreSDR image that still contains the Pluto GPIO14 or
+  UART1 DFU-button path.
+- Added a guarded QSPI bootloader/env path: `finalize-libresdr-qspi.ps1`
+  generates a partition-sized `BOOT-qspi.bin` and `uboot-env.bin`, and
+  `flash_libresdr_qspi_boot.py` backs up existing QSPI boot partitions before
+  any explicit bootloader/env write.
+- Fixed the LibreSDR Rev.5 QSPI/USB promotion path on hardware: device trees now
+  declare the board's Winbond W25Q256 flash, the legacy Linux SPI-NOR EAR helper
+  handles Winbond high-address writes, USB is forced to peripheral mode, the
+  generated environment keeps both Zynq-7020 CPUs online with `maxcpus=2`, and
+  rootfs startup pins `iiod` to CPU0 as a guard against older single-core
+  environments. A rebuilt image was flashed to QSPI and reboot-verified with
+  both CPUs online, configured USB gadget, running `iiod`, and clean W25Q256
+  detection.
+
 All notable changes to this project. Versions are git tags.
 
 ## Unreleased — ZMQ capture-control API (GPS-anchored IQ)
@@ -14,7 +67,8 @@ All notable changes to this project. Versions are git tags.
   `iio_buffer_refill` → `pps_counter` DMA-start latch for the sample-exact anchor, with a frame-grid
   fallback), returning meta + IQ **in memory** (no files). Adds: `core:frequency` = the AD9361 LO
   **read back** (catches the silent clamp), a **`t0_gps`** wait so all nodes grab the same PPS edge,
-  and the **§7 rate cap** (refuse rates whose `l_clk = n_active_rx × rate` would wedge the DMA).
+  and the **§7 rate cap** (refuse rates whose `l_clk = interface_multiplier × rate`
+  would wedge the DMA).
 - **Coexistence hardening (`xo_correct.sh` + `pluto_ctld.cpp`):** writing `xo_correction`
   re-derives the AD9361 clocks and resets the sample rate — harmless when idle, but a rate
   change *mid-DMA* wedges an in-flight capture (`errno-110`). `pluto_ctld` now drops
@@ -141,7 +195,7 @@ foundation for coordinated, multi-node capture/transmit.
   disabled by default (powers up identical to v1.3). Design: [docs](hdl/pps_counter/TDD_PPS_DESIGN.md).
 - **`tdd_verify.sh`** — on-device functional proof: confirms the sample clock is locked, the frame
   counter stays bounded and re-anchors on every PPS, and `axi_tdd` is in external-sync mode consuming
-  `pps_tick`. **Validated on hardware** (`PASS`, `FRAME_SEQ` 0..~100, `axi_tdd CONTROL=0x9`). Software
+  `pps_tick`. **Validated on hardware** (`PASS`, `FRAME_SEQ` 0..~100, `axi_tdd CONTROL=0xB`). Software
   reads are ms-jittery so this proves *function*; ns/sample precision needs a scope or two-node
   cross-correlation (precision floor ±1 sample ≈ 32.6 ns until a PPS-phase TDC is added).
 - **`xo_correct.sh` robustness** — (1) **auto-derives `NOMINAL`** from the live AD936x sample rate ×

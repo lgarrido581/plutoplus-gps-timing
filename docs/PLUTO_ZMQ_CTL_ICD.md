@@ -146,19 +146,20 @@ a DMA/refill fault; a malformed/unknown request. The reply is always exactly one
 
 ## 7. Capture semantics & safety
 
-- **PPS gating.** `tdd_sync` programs ADI `axi_tdd` channel-1 as a per-frame window
-  (`on_raw = offset_samples`), `sync_external=1` so the 1 s frame re-anchors on each GPS
-  PPS, then arms the RX DMA (`sync_start_enable=arm`). One contiguous `iio_buffer_refill`
-  = one gap-free DMA block. After the grab it disarms and restores a full-open window
-  (it never *disables* the core — that starves the DMA and needs a reboot).
+- **PPS gating.** `tdd_sync` disables ADI `axi_tdd` channel 1 temporarily and
+  programs `pps_counter`'s RX window, whose frame resets on every GPS PPS. The
+  FPGA ORs that window with the normal AXI-TDD streaming gate before the RX DMA.
+  One contiguous `iio_buffer_refill` = one gap-free DMA block. After the grab,
+  the server disables the PPS window and restores AXI-TDD full-open streaming.
 - **Measured anchor.** The FPGA latches the `cnt_clk` count of sample 0 on the DMA-start
   edge (`LATCH_COUNT`/`LATCH_SEQ`, race-free); the server confirms the latch fired for
   *this* capture (seq advanced) and reports the hardware time, else falls back.
-- **Rate cap (enforced).** The AD9361 data clock `l_clk = n_active_rx × sample_rate`;
-  overrunning the interface wedges the RX DMA (reboot to clear). The server detects
-  `n_active_rx` from the live counter vs. the current rate and **refuses** rates above
-  `61.44 MHz / n_active_rx` (61.44 MSPS for 1R1T, 30.72 MSPS for 2R2T) with an error
-  frame — it does not attempt the capture.
+- **Rate cap (enforced).** The AD936x data clock is
+  `l_clk = interface_multiplier × sample_rate`; overrunning the interface wedges
+  the RX DMA (reboot to clear). The server detects the multiplier from the live
+  counter and current rate. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
+  1×/2×); LibreSDR's validated 2R2T LVDS path uses 4× with a 122.88 MHz ceiling.
+  Both therefore cap the common 2R2T configuration at 30.72 MSPS.
 - **Blocking** is expected: a reply takes ≈ `max(0, t0_gps − now) + samples/rate +
   transfer`. The client's default timeout is 30 s, so a near-future `t0_gps` is fine.
   One capture at a time (REP serializes).
