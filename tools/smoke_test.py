@@ -14,7 +14,7 @@ Requires: paramiko, pyzmq  (pip install paramiko pyzmq).
   python tools/smoke_test.py --host 192.168.50.30 --board plutoplus
   python tools/smoke_test.py --host <ip> --board libresdr --freq 94700000 --rate 2000000
 """
-import argparse, json, math, sys, time
+import argparse, json, sys, time
 
 try:
     import paramiko, zmq
@@ -76,10 +76,12 @@ def main():
         try:
             s = ctx.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 15000); s.setsockopt(zmq.LINGER, 0)
             s.connect(f"tcp://{args.host}:5562")
-            t0 = math.ceil(time.time()) + 3           # agreed future PPS edge
+            # No t0_gps: use the "next PPS" tdd_sync path so the test needs no host<->GPS
+            # clock sync. It still exercises configure_tdd + the PPS-anchored capture (the
+            # path the v2.0 bug broke). t0-scheduled coincident capture is a DSN concern.
             req = {"op": "capture", "freq_hz": args.freq, "sample_rate_hz": args.rate,
                    "samples": args.samples, "require_gps": True, "tdd_sync": True,
-                   "t0_gps": t0, "offset_samples": 0, "node_id": "smoke"}
+                   "offset_samples": 0, "node_id": "smoke"}
             s.send_string(json.dumps(req))
             frames = s.recv_multipart(); s.close()
             # 2 frames = success [meta, iq]; 1 frame = {"error":...} (the v2.0 bug path)
