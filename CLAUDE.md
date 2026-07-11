@@ -34,6 +34,21 @@ LibreSDR target: `--target libresdr`; its HDL is prepared with `tools/build-libr
 > differ in md5 but carry the same behavior. Record the source commit + the resulting md5/sha256
 > when you hand a `.frm` downstream.
 
+## Publishing a firmware release (both radio variants)
+
+Downstream projects pin a firmware release by tag and each node fetches the asset for
+its **own** board. A release must therefore carry **both** variants plus a `SHA256SUMS`
+so consumers can learn per-file hashes without downloading the 16 MB `.frm`:
+
+```sh
+./release_firmware.sh v1.10                       # output/pluto.frm + output/libre.frm
+./release_firmware.sh v1.10 build/pluto.frm build/libre.frm
+```
+
+Assets on the tag: `pluto.frm` (Pluto+/Zynq-7010), `libre.frm` (LibreSDR/Zynq-7020),
+`SHA256SUMS`. Publish whichever variants you built (at least one required); re-running
+`--clobber`s the assets so a tag can be topped up when the second variant is ready.
+
 ## Flashing a radio
 
 `python flash_frm.py output/pluto.frm --host <pluto-ip>` — SSH (`root`/`analog`, stock ADI
