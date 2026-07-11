@@ -62,7 +62,10 @@ static int configure_tdd(struct iio_context *ctx) {
         return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
     if (!g_tdd) return -1;
-    return iio_device_attr_write(g_tdd, "enable", "0");
+    /* iio_device_attr_write returns BYTES-WRITTEN (positive) on success, negative on error;
+     * the caller checks `!= 0`, so returning the raw count reported success as failure
+     * ("iio-axi-tdd-0 not found"). Normalize to 0/-1. */
+    return iio_device_attr_write(g_tdd, "enable", "0") < 0 ? -1 : 0;
 }
 
 /* Restore free-running streaming RX WITHOUT a reboot. A gated capture disabled axi_tdd (to
