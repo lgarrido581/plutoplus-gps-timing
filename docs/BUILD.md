@@ -54,6 +54,14 @@ Either way the bit is repackaged into `pluto.frm`; the stock `boot.frm` is reuse
 patch in `docker-build-inner.sh` — you must regenerate the bit by **either** path; a stale
 `--prebuilt-bit` will silently ship the old logic.
 
+> ⚠️ **`--prebuilt-bit` is for dev iteration, not releases.** It produced the broken v2.0.1 `pluto.frm`:
+> the injected `.bit` was a **truncated 241 KB extract of the real 964 KB bitstream** (the `fdt` Python
+> lib silently truncates large `data` props when extracting), so the PL couldn't configure → boot hang →
+> brick. This is the v1.5 brick repeated. **Never extract a bitstream with the `fdt` pip lib**, and
+> **release only full `--vivado` builds** that synthesize the real bit. `test/check_frm_images.sh` now
+> fails any `.frm` whose `fpga@1` is suspiciously small — run it on every artifact. See
+> [`../RELEASING.md`](../RELEASING.md).
+
 **Base vs bootloader:** the build produces **`pluto.frm` only**, never `boot.frm` (FSBL + bitstream +
 U-Boot). For a normal update of a working device, `pluto.frm` is all you need. To flash a
 fresh/bricked device's bootloader you need a Pluto+ `boot.frm` from a prebuilt release — see

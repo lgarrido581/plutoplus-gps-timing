@@ -40,6 +40,19 @@ step "unit/model tests"
 [ -f hdl/pps_counter/test_tdd_window_model.py ] && command -v python3 >/dev/null 2>&1 && \
     { python3 hdl/pps_counter/test_tdd_window_model.py || bad "test_tdd_window_model"; }
 
+step "frm image integrity (if a built artifact is present)"
+if command -v mkimage >/dev/null 2>&1 || command -v dumpimage >/dev/null 2>&1; then
+    _found=0
+    for frm in output/*.frm; do
+        [ -f "$frm" ] || continue
+        _found=1
+        sh test/check_frm_images.sh "$frm" || bad "check_frm_images $frm"
+    done
+    [ "$_found" -eq 0 ] && echo "  (no output/*.frm to check -- built artifacts are gitignored)"
+else
+    echo "  (mkimage/dumpimage not installed -- skipped; run test/check_frm_images.sh at release)"
+fi
+
 step "HDL lint (optional -- needs Vivado xvlog)"
 command -v xvlog >/dev/null 2>&1 && \
     { xvlog hdl/pps_counter/pps_counter.v >/dev/null 2>&1 || bad "xvlog pps_counter.v"; } || \
