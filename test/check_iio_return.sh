@@ -17,13 +17,12 @@
 # The correct idiom is:  (iio_..._attr_write(...) < 0) ? -1 : 0   (or check `< 0`).
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-files="$here/../services"/*.c
 fail=0
 
-# strip _longlong/_double variants (which are 0-on-success) from consideration:
-W='iio_\(device\|channel\)_attr_write[^_a-zA-Z]'
-
-for f in $files; do
+# The typed _longlong/_double writers return 0-on-success and are exempt; the regexes
+# below match only the bare string writers `iio_(device|channel)_attr_write(` so those
+# variants are excluded automatically.
+for f in "$here/../services"/*.c; do
     [ -e "$f" ] || continue
     # 1) `return <string-writer>(...)` without a `< 0` normalization on the line
     if grep -nE "return[[:space:]]+iio_(device|channel)_attr_write[[:space:]]*\(" "$f" \

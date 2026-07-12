@@ -18,44 +18,58 @@ python flash_frm.py output/pluto.frm
 #   --no-reboot                # flash now, reboot later
 ```
 It transfers the `.frm`, **verifies the md5 on the board before touching flash**,
-`flashcp`s it, reboots, and confirms `uptime` reset + RX works. It **aborts** if the
-md5 doesn't match.
+runs the board's `update_frm.sh` to flash it (which **also sets `fit_size`** — see
+below), **asserts `fit_size` matches the new image**, reboots, and confirms `uptime`
+reset + RX works. It **aborts** on any mismatch.
 
-## Why this is safe
+## Why this is safe — and the `fit_size` gotcha that can brick you
 - It writes **only `mtd3` (`qspi-linux`)** — the FIT image (kernel + dtb + rootfs +
   bitstream). **`mtd0` (FSBL/u-boot) and `mtd1` (env) are never touched**, so the
-  bootloader + DFU stay intact: even a botched/interrupted flash is recoverable via
-  `device_reboot sf` → `dfu-util`. You can't brick it this way.
-- This is exactly what the official "copy `pluto.frm` to the USB drive + eject"
-  update does internally (`flashcp` to the QSPI) — just over SSH.
-- The **md5-before-flash check** is the real safety net: a corrupt transfer never
-  reaches flash.
+  bootloader + DFU stay intact: even an interrupted flash is recoverable via
+  `device_reboot sf` → `dfu-util`. Recovery survives — see `RECOVERY.md`.
+- ⚠️ **A bare `flashcp` is NOT enough — it can brick.** U-Boot reads exactly
+  **`fit_size` bytes** of the FIT from QSPI at boot. If you write a FIT that is
+  *larger* than the current `fit_size` and don't update `fit_size`, U-Boot loads a
+  **truncated** FIT and the board won't boot. This is what shipped-broken v2.0.1 came
+  down to: a 700 KB size change with a stale `fit_size`.
+- So the flash **must** run `fw_setenv fit_size <new FIT.itb size>`. The board's
+  `/sbin/update_frm.sh` does this (md5-checks the trailer, strips it, `dd`s the
+  FIT.itb to `mtdblock3`, then `fw_setenv fit_size`). **Always flash through it**,
+  which is what `flash_frm.py` does — never hand-roll a `flashcp`.
+- The **md5-before-flash check** guards transfer integrity; the **`fit_size` assert**
+  guards bootability. Both must pass before reboot.
 
 ## Manual sequence (what the script does)
 ```sh
 # 0. (host) note the local md5
 md5sum output/pluto.frm
 
-# 1. (host->board) raw-copy the .frm  (SSH is binary-safe; no scp/sftp on Pluto)
+# 1. (host->board) raw-copy the .frm  (SSH is binary-safe; no scp/sftp on Pluto).
+#    The remote name MUST end in .frm -- update_frm.sh checks the extension.
 ssh root@pluto.local 'cat > /tmp/fw.frm' < output/pluto.frm        # pw: analog
 
 # 2. (board) VERIFY md5 matches step 0 -- do NOT proceed if it differs
 ssh root@pluto.local 'md5sum /tmp/fw.frm'
 
-# 3. (board) flash to qspi-linux (erase + write + verify)
-ssh root@pluto.local 'flash_unlock /dev/mtd3 2>/dev/null; flashcp -v /tmp/fw.frm /dev/mtd3'
-#   flash_unlock may print "Operation not supported" -- harmless; flashcp still works.
-#   Wait for "Verifying data: ... (100%)".
+# 3. (board) flash via the board's own updater -- it validates the .frm's md5
+#    trailer, writes the FIT to mtdblock3, AND sets fit_size (the anti-brick step).
+ssh root@pluto.local '/sbin/update_frm.sh /tmp/fw.frm'
+#   expect "Done". A "Failed Checksum error" means a corrupt/mismatched .frm (safe --
+#   nothing was flashed). Do NOT substitute a raw `flashcp`: it skips fit_size.
 
-# 4. (board) reboot into the new firmware
+# 4. (board) confirm fit_size now matches the new FIT.itb size (frm bytes minus 33):
+ssh root@pluto.local 'fw_printenv fit_size'
+#   e.g. a 16317300-byte .frm -> FIT.itb 16317267 -> fit_size=F8FB53 (printf %X).
+
+# 5. (board) reboot into the new firmware
 ssh root@pluto.local 'sync; /sbin/reboot'
 
-# 5. (host) after ~20-30 s, verify it came back + RX works
+# 6. (host) after ~20-30 s, verify it came back + RX works
 #    NOTE: pluto.local mDNS is often slow to re-register after a reboot --
 #    the board is also reachable at its GPS-firmware static IP 192.168.50.30.
-ssh root@192.168.50.30 'uptime; devmem 0x7C460008 32; \
-  iio_readdev -b 8192 -s 8192 cf-ad9361-lpc voltage0 voltage1 | wc -c'
-#   expect: uptime "up 0 min", pps_present 0x1, and 32768 bytes from iio_readdev.
+ssh root@192.168.50.30 'uptime; devmem 0x7C460008 32'
+#   expect: uptime "up 0 min", pps_present 0x1. Then run the release gate:
+#   python tools/smoke_test.py --host 192.168.50.30 --board plutoplus
 ```
 
 ## MTD layout (for reference)

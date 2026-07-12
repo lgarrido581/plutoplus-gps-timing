@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Flash a Pluto+ firmware .frm over the network (SSH), safely and repeatably.
 
-This is the same sequence we validated by hand: raw-transfer the .frm, verify its
-md5 ON THE BOARD before touching flash, then flashcp it to the qspi-linux MTD and
-reboot. Only the Linux/bitstream partition (mtd3) is written -- the FSBL/u-boot
-(mtd0) and env (mtd1) are never touched, so DFU recovery (`device_reboot sf` +
-dfu-util) is always available even if a flash is interrupted.
+The flash itself is delegated to the board's own **/sbin/update_frm.sh** -- the
+same updater the USB mass-storage "drop pluto.frm + eject" path runs. That matters
+because a raw `flashcp` to mtd3 is NOT sufficient: U-Boot reads exactly **`fit_size`
+bytes** of the FIT from QSPI at boot, and update_frm.sh does `fw_setenv fit_size`
+to match the new image. A `flashcp` that leaves `fit_size` stale will make U-Boot
+load a TRUNCATED FIT when the new image is larger than the old `fit_size` -> the
+board won't boot. (This bit us on v2.0.1: a 700 KB size change + a stale `fit_size`.)
 
-This is the underlying operation the USB mass-storage "drop pluto.frm + eject"
-update performs internally (flashcp to the QSPI), just done over SSH.
+Only mtd3 (`qspi-linux`, the FIT) is written; the FSBL/u-boot (mtd0) and env (mtd1)
+are never touched, so DFU recovery (`device_reboot sf` + dfu-util) survives even an
+interrupted flash. See RECOVERY.md.
+
+This wrapper adds, around update_frm.sh:
+  * a raw binary transfer of the .frm,
+  * an md5 check ON THE BOARD before flashing (aborts on a corrupt transfer),
+  * a post-flash assertion that `fit_size` now equals the new FIT.itb size,
+  * reboot + a health probe (PPS live, pluto_zmqd RX-DMA OK).
 
 Requires: paramiko  (pip install paramiko).
 
@@ -17,7 +26,8 @@ Usage:
     python flash_frm.py output/pluto.frm --host 192.168.50.30
     python flash_frm.py output/pluto.frm --no-reboot     # flash but don't reboot
 
-Safety: the flash is ABORTED if the on-board md5 does not match the local file.
+Safety: ABORTS if the on-board md5 mismatches, if update_frm.sh does not print
+"Done", or if `fit_size` does not match the new image afterward.
 """
 import argparse
 import hashlib
@@ -26,8 +36,8 @@ import time
 
 import paramiko
 
-MTD = "/dev/mtd3"            # qspi-linux (holds the FIT); FSBL/u-boot/env are untouched
-REMOTE = "/tmp/_flash.frm"
+REMOTE = "/tmp/_flash.frm"   # must end in .frm -- update_frm.sh checks the extension
+TRAILER = 33                 # .frm = FIT.itb + 33-byte md5 trailer; U-Boot boots the FIT.itb
 
 
 def connect(host, timeout=15):
@@ -54,10 +64,23 @@ def main():
 
     data = open(args.frm, "rb").read()
     local_md5 = hashlib.md5(data).hexdigest()
+    # The FIT.itb is the .frm minus its 33-byte md5 trailer; update_frm.sh writes
+    # that stripped image and sets fit_size to its length (uppercase hex, no 0x).
+    fit_len = len(data) - TRAILER
+    trailer = data[-TRAILER:].decode(errors="replace").strip()
+    fit_md5 = hashlib.md5(data[:fit_len]).hexdigest()
+    want_fit_size = format(fit_len, "X")
     print(f"[*] {args.frm}: {len(data)} bytes, md5={local_md5}")
+    print(f"[*] FIT.itb={fit_len} bytes -> expected fit_size=0x{want_fit_size}")
+    if trailer != fit_md5:
+        sys.exit(f"[!] .frm trailer md5 ({trailer}) != FIT.itb md5 ({fit_md5}) -- the "
+                 f".frm is malformed; update_frm.sh would reject it. ABORTING.")
 
     c = connect(args.host)
     print(f"[*] connected to {args.host} ({run(c, 'uptime').strip()})")
+    if "update_frm.sh" not in run(c, "command -v update_frm.sh /sbin/update_frm.sh"):
+        sys.exit("[!] /sbin/update_frm.sh not found on the board -- refusing to hand-roll "
+                 "a flashcp (it would not set fit_size and could brick on a size change).")
 
     # 1. raw binary transfer (SSH is binary-safe; far faster than xxd hex)
     t = time.time()
@@ -65,47 +88,56 @@ def main():
     sin.write(data); sin.channel.shutdown_write(); sout.read()
     print(f"[*] transferred in {time.time()-t:.1f}s")
 
-    # 2. VERIFY md5 on the board BEFORE flashing -- abort on mismatch
+    # 2. VERIFY md5 on the board BEFORE flashing -- abort on a corrupt transfer
     remote_md5 = run(c, f"md5sum {REMOTE}").split()[0]
     if remote_md5 != local_md5:
         sys.exit(f"[!] md5 MISMATCH (board {remote_md5} != local {local_md5}) -- ABORTING")
-    print(f"[*] on-board md5 matches -- safe to flash")
+    print("[*] on-board md5 matches -- safe to flash")
 
-    # 3. flashcp to mtd3 (erase + write + verify). flash_unlock may say "not
-    #    supported"; that's fine -- flashcp still erases+writes.
-    run(c, f"flash_unlock {MTD} 2>/dev/null")
-    print(f"[*] flashing {MTD} (erase + write + verify, ~30-60s)...")
-    out = run(c, f"flashcp -v {REMOTE} {MTD}; echo EXIT=$?")
-    last = [l for l in out.replace("\r", "\n").splitlines() if l.strip()][-3:]
-    print("    " + "\n    ".join(last))
-    if "EXIT=0" not in out:
-        sys.exit("[!] flashcp did NOT report success -- do NOT reboot; investigate")
+    # 3. flash via the board's own updater: it md5-checks the trailer, strips it,
+    #    dd's the FIT.itb to mtdblock3, AND runs `fw_setenv fit_size` so U-Boot reads
+    #    the right length. This is the step a bare flashcp gets wrong.
+    fit_before = run(c, "fw_printenv fit_size").strip()
+    print(f"[*] flashing via update_frm.sh (was {fit_before})...")
+    out = run(c, f"/sbin/update_frm.sh {REMOTE}; echo RC=$?")
+    tail = [l for l in out.replace("\r", "\n").splitlines() if l.strip()][-4:]
+    print("    " + "\n    ".join(tail))
+    if "Done" not in out:
+        sys.exit("[!] update_frm.sh did NOT print 'Done' (checksum/magic/write failure) -- "
+                 "do NOT reboot; the old firmware is still in flash. Investigate.")
+
+    # 4. assert fit_size now matches the new image -- the anti-brick invariant
+    fit_after = run(c, "fw_printenv fit_size").strip()  # e.g. "fit_size=F8FB53"
+    got = fit_after.split("=", 1)[-1].strip()
+    if got.upper() != want_fit_size.upper():
+        sys.exit(f"[!] fit_size is {got}, expected {want_fit_size} -- U-Boot would load a "
+                 f"WRONG-length FIT. Do NOT reboot; re-run update_frm.sh. ABORTING.")
+    print(f"[*] flash OK: fit_size {fit_before} -> {fit_after} (matches new FIT)")
     run(c, f"rm -f {REMOTE}")
-    print("[*] flash OK (written + verified)")
 
     if args.no_reboot:
         print("[*] --no-reboot: not rebooting. Reboot the board to boot the new firmware.")
         c.close(); return
 
-    # 4. reboot + verify it came back, timing is live, and RX-DMA telemetry is OK
+    # 5. reboot + verify it came back, timing is live, RX-DMA telemetry is OK
     print("[*] rebooting...")
     try: c.exec_command("sync; (sleep 1; /sbin/reboot) &", timeout=5)
     except Exception: pass
     c.close()
     time.sleep(10)
-    for host in (args.host, "192.168.50.30", "pluto.local"):  # mDNS can be slow post-boot
+    host = None
+    for h in (args.host, "192.168.50.30", "pluto.local"):  # mDNS can be slow post-boot
         for _ in range(20):
-            try: c = connect(host, timeout=6); break
+            try: c = connect(h, timeout=6); host = h; break
             except Exception: time.sleep(4); c = None
         if c: break
     if not c:
         sys.exit("[!] board did not come back in time. Check power; it may be at a "
                  "different address. (FSBL/u-boot intact -> DFU recovery available.)")
-    # Health: board is back, timing hardware is LIVE (PPS advancing), and the
-    # telemetry service is up. RX is intentionally NOT probed with a free-running
-    # iio_readdev -- this design DMA-starts the RX buffer off the TDD channel, so a
-    # bare read starves and false-alarms. The authoritative RX-DMA health is
-    # pluto_zmqd's dma.rx_ok (below), which reflects the real capture path.
+    # Health: back up, timing hardware LIVE (PPS advancing), telemetry up. RX is NOT
+    # probed with a free-running iio_readdev -- this design DMA-starts RX off the TDD
+    # channel, so a bare read starves and false-alarms. Authoritative RX health is
+    # pluto_zmqd's dma.rx_ok (below).
     print(f"[*] back up: {run(c, 'uptime').strip()}")
     present = run(c, "devmem 0x7C460008 32").strip()
     pps0 = run(c, "devmem 0x7C460018 32").strip()
@@ -131,7 +163,8 @@ def main():
     except Exception as e:
         print(f"[*] RX-DMA: query pluto_zmqd :5561 'dma' for rx_ok "
               f"(pyzmq unavailable: {type(e).__name__})")
-    print("[*] done.")
+    print("[*] done. For a release, now run: python tools/smoke_test.py --host "
+          f"{host} --board plutoplus")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,7 @@ docker run --rm \
     -v "$(pwd)/hdl:/build/hdl-src:ro" \
     -v "$(pwd)/services:/build/services-src:ro" \
     -v "$(pwd)/boards:/build/boards-src:ro" \
+    -v "$(pwd)/test:/build/test-src:ro" \
     $VIVADO_MOUNT \
     $PREBUILT_MOUNT \
     $EXTRA_ENV \
