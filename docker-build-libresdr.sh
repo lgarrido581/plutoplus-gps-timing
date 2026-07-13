@@ -239,6 +239,29 @@ export TARGET=libre
 # mirrors at build time. It is not part of the firmware payload and can hang
 # otherwise reproducible builds when those mirrors are unavailable.
 export SKIP_LEGAL=1
+
+# SKIP_LEGAL=1 skips the Makefile's legal-info step, which is normally what
+# generates board/libre/msd/LICENSE.html. But board/libre/genimage-msd.cfg still
+# lists LICENSE.html as a file for the MSD VFAT, so target-finalize (genimage)
+# aborts with "could not setup LICENSE.html". Provide it from the board LICENSE
+# text (HTML-escaped) so the build completes. This is cosmetic USB-mass-storage
+# content only and has no effect on the firmware/FPGA/timing payload.
+if [ ! -f buildroot/board/libre/msd/LICENSE.html ]; then
+    if [ -f buildroot/board/libre/msd/LICENSE ]; then
+        {
+            printf '<!doctype html><html><head><meta charset="utf-8">'
+            printf '<title>License</title></head><body><pre>\n'
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                buildroot/board/libre/msd/LICENSE
+            printf '</pre></body></html>\n'
+        } > buildroot/board/libre/msd/LICENSE.html
+    else
+        printf '<!doctype html><title>License</title><p>See device docs.</p>\n' \
+            > buildroot/board/libre/msd/LICENSE.html
+    fi
+    info "Generated board/libre/msd/LICENSE.html (SKIP_LEGAL workaround)"
+fi
+
 info "Building LibreSDR kernel, DTB, rootfs, U-Boot and FIT firmware"
 make -j"$(nproc)" \
     build/zImage build/zynq-libre.dtb build/rootfs.cpio.gz \
