@@ -73,10 +73,19 @@ static volatile sig_atomic_t g_stop = 0;
 static volatile uint32_t* g_regs = nullptr;   // mmap'd pps_counter page (or null)
 static bool g_have_counter = false;
 
-// pps_advancing is computed only on the 1 Hz tick so a sub-second REP can't make it
-// flap; REP reads present/seq/delta live but report this cached advancing verdict.
-static uint32_t g_prev_seq = 0;
-static bool g_prev_seq_valid = false;
+// pps_advancing is a *time-based* liveness verdict, recomputed on the 1 Hz tick so a
+// sub-second REP can't make it flap; REP reads present/seq/delta live but report this
+// cached verdict. It is NOT "seq changed since the last tick": the tick is a ~1 Hz
+// software timer (mono clock) sampling the 1 Hz hardware PPS_SEQ, so their two 1 Hz
+// rates beat -- when a tick lands in the same PPS second as the previous one, seq is
+// unchanged for that single tick even though PPS is perfectly live. Declaring "not
+// advancing" on one unchanged tick therefore aliases to a false negative. Instead we
+// latch the mono time PPS_SEQ last changed and only call PPS dead once it has been
+// frozen longer than a couple PPS periods.
+static uint32_t g_last_seq = 0;
+static bool g_last_seq_valid = false;
+static struct timespec g_seq_change_ts = {0, 0};   // mono time PPS_SEQ last moved
+static const double PPS_STALE_S = 2.5;             // > 2 PPS periods: immune to the beat
 static const char* g_advancing = "null";      // "true" | "false" | "null"
 
 static std::string g_node_id = "pluto";
@@ -236,12 +245,30 @@ static void timing_init() {
 }
 
 // Update the cached pps_advancing verdict. Called once per 1 Hz tick only.
+// Time-based (see the g_last_seq comment): "true" while PPS_SEQ has moved within the
+// last PPS_STALE_S; "false" only once it has been frozen longer than that (real dead
+// PPS). A single tick that happens to see no change (the 1 Hz tick/PPS beat) stays
+// "true", so healthy PPS never aliases to a spurious "not advancing".
 static void timing_tick() {
     if (!g_have_counter) return;
     uint32_t seq = reg_read(REG_SEQ);
-    if (g_prev_seq_valid) g_advancing = (seq > g_prev_seq) ? "true" : "false";
-    g_prev_seq = seq;
-    g_prev_seq_valid = true;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (!g_last_seq_valid) {                 // first sample: seed, verdict stays "null"
+        g_last_seq = seq;
+        g_seq_change_ts = now;
+        g_last_seq_valid = true;
+        return;
+    }
+    if (seq != g_last_seq) {                 // PPS edge counted -> live; stamp when
+        g_last_seq = seq;
+        g_seq_change_ts = now;
+        g_advancing = "true";
+    } else {                                 // unchanged -> live unless frozen too long
+        double stale = (double)(now.tv_sec - g_seq_change_ts.tv_sec)
+                     + (double)(now.tv_nsec - g_seq_change_ts.tv_nsec) / 1e9;
+        g_advancing = (stale > PPS_STALE_S) ? "false" : "true";
+    }
 }
 
 // xo_ppm = the last "(+0.000ppm)"-style value the xocorrect daemon logged (it
