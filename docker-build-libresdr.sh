@@ -360,7 +360,7 @@ cp build/libre.frm build/libre.dfu "$OUT/"
 # Pluto+ v1.5/v2.0.1 brick). Re-measure the produced FIT with the shared release check
 # (mkimage-based; never the fdt pip lib); quarantine + fail if any image is short.
 if [ -f "$OUT/libre.frm" ] && [ -f /build/test-src/check_frm_images.sh ]; then
-    info "Anti-truncation gate: validating libre.frm image sizes (mkimage)..."
+    info "Anti-truncation gate: validating libre.frm image sizes (FDT parse)..."
     if ! sh /build/test-src/check_frm_images.sh "$OUT/libre.frm"; then
         mv "$OUT/libre.frm" "$OUT/libre.frm.TRUNCATED-DO-NOT-FLASH" 2>/dev/null || true
         die "libre.frm FAILED the image-integrity gate (truncated bitstream?). Quarantined as libre.frm.TRUNCATED-DO-NOT-FLASH. Refusing to ship a brick."

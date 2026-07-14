@@ -72,6 +72,29 @@ ssh root@192.168.50.30 'uptime; devmem 0x7C460008 32'
 #   python tools/smoke_test.py --host 192.168.50.30 --board plutoplus
 ```
 
+## Post-flash validation (quick checklist)
+
+`flash_frm.py` already asserts the flash landed (`fit_size`), that PPS is live, and — if
+`pyzmq` is available — `dma.rx_ok`. For a manual once-over (`root`/`analog`, `<board-ip>` =
+`pluto.local` / `192.168.50.30` / usb `192.168.2.1`), confirm:
+
+```sh
+uname -a                         # NEW build date/#N -> the flash took (not the old rootfs)
+fw_printenv mode                 # channel mode preserved (e.g. 2r2t)
+fw_printenv fit_size             # == new FIT.itb size (.frm bytes - 33, printf %X)
+devmem 0x7C460000 32             # pps_counter ID -> 0x50505343 ("PSC"): the timing core is present
+devmem 0x7C460040 32             # latch SEQ -> a real count that advances per capture, NOT 0x50505343
+                                 #   (0x50505343 here == the old 6-bit-decode alias -> latch can't fire)
+iio_attr -c ad9361-phy altvoltage0 frequency      # RX LO tuned to your center freq
+iio_attr -c ad9361-phy voltage0 sampling_frequency
+iio_attr -c ad9361-phy voltage0 rssi              # RX chain alive (a real dB reading)
+iio_attr -d | grep tdd           # "iio-axi-tdd-0: found N device attributes" -> configure_tdd works
+```
+
+Then the release gate: `python tools/smoke_test.py --host <board-ip> --board <plutoplus|libresdr>`
+(asserts an actual GPS-anchored capture succeeds). For LibreSDR the same checks apply; the
+board reports `board=libresdr` and clocks the AD9361 data path at 2× the Pluto+ (see `docs/LIBRESDR.md`).
+
 ## MTD layout (for reference)
 | dev  | partition         | flashed? |
 |------|-------------------|----------|

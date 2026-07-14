@@ -39,9 +39,12 @@ ship in the release.**
    `--prebuilt-bit` is a **dev-iteration** convenience only; a tagged artifact is always a full `--vivado`
    build that synthesizes the real bitstream.
 3. **Verify the built artifact:** `sh test/check_frm_images.sh output/pluto.frm [prev-release.frm]` — it
-   uses the non-truncating `mkimage -l` (never the `fdt` lib) to assert `fpga@1`/kernel/ramdisk are
-   full-size (catches the v1.5 and v2.0.1 truncated-bitstream bricks) and that the `.frm` md5 trailer is
-   valid. This is a hard gate: a shrunk image is a STOP.
+   measures each `fpga@1`/kernel/ramdisk image by parsing the FIT's flattened device tree directly in
+   python3 (the authoritative `FDT_PROP` length field — never the `fdt` pip lib, which truncates, and
+   never `mkimage -l`, which u-boot-tools 2022.01 misdetects as a "GP Header" and lists nothing). It
+   asserts each image is full-size (catches the v1.5 and v2.0.1 truncated-bitstream bricks) and that the
+   `.frm` md5 trailer is valid. This is a hard gate: a shrunk image is a STOP. Runs automatically at the
+   end of every `docker-run.sh` build, too.
 4. **Flash each board with `update_frm.sh` / `flash_frm.py`, then run `smoke_test.py` → `SMOKE PASS`.**
    - The flash MUST set `fit_size` (U-Boot reads exactly `fit_size` bytes of the FIT at boot; a stale
      value = truncated FIT = brick). `flash_frm.py` delegates to the board's `update_frm.sh` and asserts
