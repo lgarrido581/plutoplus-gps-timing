@@ -239,6 +239,29 @@ export TARGET=libre
 # mirrors at build time. It is not part of the firmware payload and can hang
 # otherwise reproducible builds when those mirrors are unavailable.
 export SKIP_LEGAL=1
+
+# SKIP_LEGAL=1 skips the Makefile's legal-info step, which is normally what
+# generates board/libre/msd/LICENSE.html. But board/libre/genimage-msd.cfg still
+# lists LICENSE.html as a file for the MSD VFAT, so target-finalize (genimage)
+# aborts with "could not setup LICENSE.html". Provide it from the board LICENSE
+# text (HTML-escaped) so the build completes. This is cosmetic USB-mass-storage
+# content only and has no effect on the firmware/FPGA/timing payload.
+if [ ! -f buildroot/board/libre/msd/LICENSE.html ]; then
+    if [ -f buildroot/board/libre/msd/LICENSE ]; then
+        {
+            printf '<!doctype html><html><head><meta charset="utf-8">'
+            printf '<title>License</title></head><body><pre>\n'
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                buildroot/board/libre/msd/LICENSE
+            printf '</pre></body></html>\n'
+        } > buildroot/board/libre/msd/LICENSE.html
+    else
+        printf '<!doctype html><title>License</title><p>See device docs.</p>\n' \
+            > buildroot/board/libre/msd/LICENSE.html
+    fi
+    info "Generated board/libre/msd/LICENSE.html (SKIP_LEGAL workaround)"
+fi
+
 info "Building LibreSDR kernel, DTB, rootfs, U-Boot and FIT firmware"
 make -j"$(nproc)" \
     build/zImage build/zynq-libre.dtb build/rootfs.cpio.gz \
@@ -337,7 +360,7 @@ cp build/libre.frm build/libre.dfu "$OUT/"
 # Pluto+ v1.5/v2.0.1 brick). Re-measure the produced FIT with the shared release check
 # (mkimage-based; never the fdt pip lib); quarantine + fail if any image is short.
 if [ -f "$OUT/libre.frm" ] && [ -f /build/test-src/check_frm_images.sh ]; then
-    info "Anti-truncation gate: validating libre.frm image sizes (mkimage)..."
+    info "Anti-truncation gate: validating libre.frm image sizes (FDT parse)..."
     if ! sh /build/test-src/check_frm_images.sh "$OUT/libre.frm"; then
         mv "$OUT/libre.frm" "$OUT/libre.frm.TRUNCATED-DO-NOT-FLASH" 2>/dev/null || true
         die "libre.frm FAILED the image-integrity gate (truncated bitstream?). Quarantined as libre.frm.TRUNCATED-DO-NOT-FLASH. Refusing to ship a brick."

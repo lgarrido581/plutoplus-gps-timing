@@ -4,15 +4,21 @@
 #   v1.5   -- 241 KB fpga@1 (real 965 KB): PL can't configure -> boot hang -> brick
 #   v2.0.1 -- 241 KB fpga@1 again, from a --prebuilt-bit build fed an fdt-truncated .bit
 #
-# The truncation is invisible to md5-of-frm, FIT-structure checks, and the `fdt` Python
-# lib (which ITSELF silently truncates large `data` props -- never use it to measure).
-# We use u-boot's own `mkimage -l` (or `dumpimage -l`), which reports true Data Sizes.
+# The truncation is invisible to md5-of-frm and FIT-structure sanity checks. We measure
+# each /images/* embedded `data` property's TRUE length by parsing the FIT's flattened
+# device tree directly (the FDT_PROP length field is authoritative). We deliberately do
+# NOT use:
+#   * the `fdt` PYTHON pip lib -- it silently truncates large `data` props, and
+#   * `mkimage -l` / `dumpimage -l` -- u-boot-tools 2022.01 misdetects a bare FIT as a
+#     "GP Header" (the gpimage type check matches any file first) and lists no images,
+#     which false-quarantined every real build. See git history for the switch.
 #
 # Usage:
 #   sh test/check_frm_images.sh output/pluto.frm                 # absolute-floor check
 #   sh test/check_frm_images.sh output/pluto.frm prev.frm        # + shrink-vs-reference
 #
-# Exit 0 = all images full-size and trailer valid; non-zero = STOP, do not release.
+# Requires: python3 (stdlib only) + coreutils. Exit 0 = all images full-size and trailer
+# valid; non-zero = STOP, do not release.
 set -u
 
 FRM="${1:?usage: check_frm_images.sh <new.frm> [reference.frm]}"
@@ -26,12 +32,9 @@ RAMDISK_MIN=1000000
 SHRINK_PCT=90        # if a reference is given, each image must be >= 90% of its size
 
 have() { command -v "$1" >/dev/null 2>&1; }
-LISTER=""
-if have mkimage; then LISTER="mkimage -l"
-elif have dumpimage; then LISTER="dumpimage -l"
-else
-    echo "FAIL: need u-boot-tools (mkimage/dumpimage) to measure FIT images."
-    echo "      apt-get install u-boot-tools   (do NOT fall back to the fdt pip lib -- it truncates)"
+if ! have python3; then
+    echo "FAIL: need python3 (stdlib) to measure FIT images."
+    echo "      apt-get install python3   (do NOT fall back to mkimage -l -- it misdetects FITs)"
     exit 2
 fi
 
@@ -50,11 +53,49 @@ strip_and_check() {
     [ "$_trailer" = "$_calc" ]
 }
 
-# echo "<name> <data_size>" per image from the FIT listing.
+# echo "<name> <data_size>" per /images/* node, reading the FDT_PROP length of each
+# image's embedded `data` property straight from the flattened device tree. Version-
+# independent and exact (no mkimage, no fdt pip lib). Warns to stderr if totalsize!=body.
 image_sizes() {
-    $LISTER "$1" 2>/dev/null | awk '
-        /Image[ ]+[0-9]+ \(/ { name=$0; sub(/.*\(/,"",name); sub(/\).*/,"",name); next }
-        /Data Size:/ { for(i=1;i<=NF;i++) if($i=="Bytes"){ print name, $(i-1) } }'
+    python3 - "$1" <<'PY'
+import sys, struct
+b = open(sys.argv[1], "rb").read()
+if len(b) < 16 or b[:4] != b"\xd0\x0d\xfe\xed":
+    sys.exit(0)  # not a FIT -> emit nothing -> caller reports "could not read"
+totalsize, off_struct, off_strings = struct.unpack(">III", b[4:16])
+if totalsize != len(b) or off_strings > len(b) or off_struct > len(b):
+    # inconsistent header = truncated/corrupt: emit nothing so the caller FAILs cleanly.
+    sys.stderr.write("WARN: FIT header inconsistent (totalsize %d, body %d) -- truncated?\n"
+                     % (totalsize, len(b)))
+    sys.exit(0)
+align4 = lambda x: (x + 3) & ~3
+FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP, FDT_NOP, FDT_END = 1, 2, 3, 4, 9
+pos, stack = off_struct, []
+try:
+    while pos < off_strings:
+        (tag,) = struct.unpack(">I", b[pos:pos+4]); pos += 4
+        if tag == FDT_BEGIN_NODE:
+            e = b.index(b"\x00", pos); stack.append(b[pos:e].decode("ascii", "replace"))
+            pos = align4(e + 1)
+        elif tag == FDT_END_NODE:
+            stack.pop()
+        elif tag == FDT_PROP:
+            length, nameoff = struct.unpack(">II", b[pos:pos+8]); pos += 8
+            e = b.index(b"\x00", off_strings + nameoff)
+            pname = b[off_strings + nameoff:e].decode("ascii", "replace")
+            segs = [s for s in stack if s]
+            if pname == "data" and len(segs) == 2 and segs[0] == "images":
+                print(segs[1], length)
+            pos = align4(pos + length)
+        elif tag == FDT_NOP:
+            continue
+        elif tag == FDT_END:
+            break
+        else:
+            break
+except (struct.error, ValueError, IndexError):
+    sys.stderr.write("WARN: FIT struct walk aborted -- malformed/truncated\n")
+PY
 }
 
 size_of() { echo "$1" | awk -v n="$2" '$1==n {print $2; found=1} END{if(!found) print -1}'; }

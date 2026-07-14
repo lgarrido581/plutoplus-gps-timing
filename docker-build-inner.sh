@@ -869,7 +869,7 @@ cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /b
 # release check (mkimage-based; never the fdt pip lib). Any short image fails the
 # build here and the bad artifact is quarantined so it can't be flashed by accident.
 if [ -f "/build/output/$FRM_OUT" ] && [ -f /build/test-src/check_frm_images.sh ]; then
-    info "Anti-truncation gate: validating $FRM_OUT image sizes (mkimage)..."
+    info "Anti-truncation gate: validating $FRM_OUT image sizes (FDT parse)..."
     if ! sh /build/test-src/check_frm_images.sh "/build/output/$FRM_OUT"; then
         mv "/build/output/$FRM_OUT" "/build/output/$FRM_OUT.TRUNCATED-DO-NOT-FLASH" 2>/dev/null || true
         die "$FRM_OUT FAILED the image-integrity gate (truncated bitstream?). Quarantined as $FRM_OUT.TRUNCATED-DO-NOT-FLASH. Refusing to ship a brick -- see RELEASING.md."
