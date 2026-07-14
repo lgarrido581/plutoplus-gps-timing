@@ -831,7 +831,15 @@ info "Starting build ($(nproc) cores) — Option B (pluto.frm; no FSBL/boot.frm)
 # injected .bit must already be the final bitstream the FIT embeds (Vivado-compressed).
 if [ -n "${PREBUILT_BIT:-}" ]; then
     [ -f "$PREBUILT_BIT" ] || die "PREBUILT_BIT=$PREBUILT_BIT not found"
-    info "  PREBUILT_BIT set -> reusing $PREBUILT_BIT ($(stat -c %s "$PREBUILT_BIT") bytes), skipping bitstream synth"
+    _bitsz=$(stat -c %s "$PREBUILT_BIT")
+    info "  PREBUILT_BIT set -> reusing $PREBUILT_BIT (${_bitsz} bytes), skipping bitstream synth"
+    # Fail-fast anti-truncation guard. A real PL bitstream is ~0.9 MB (Pluto+ XC7Z010)
+    # to ~2.4 MB (LibreSDR XC7Z020). A ~241 KB .bit is the fingerprint of an
+    # fdt-pip-lib-truncated extract and WILL brick the board (this caused the v1.5 and
+    # v2.0.1 bricks). Refuse it here rather than package a doomed FIT.
+    if [ "$_bitsz" -lt 400000 ]; then
+        die "PREBUILT_BIT is only ${_bitsz} bytes -- almost certainly a TRUNCATED bitstream (real is ~0.9-2.4 MB). Re-extract with dumpimage/mkimage (NEVER the fdt pip lib), or do a full --vivado build. See RELEASING.md / docs/BUILD.md."
+    fi
 fi
 (
     make -j"$(nproc)" build/system_top.xsa \
@@ -855,6 +863,21 @@ cp build/pluto.dfu     "/build/output/$DFU_OUT" 2>/dev/null && info "  $DFU_OUT 
 cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /build/output/" || true
 
 [ $BUILD_EXIT -ne 0 ] && die "Build failed with exit code $BUILD_EXIT" || true
+
+# Fail-hard anti-brick gate: a build must NEVER "succeed" with a truncated FPGA
+# bitstream (the v1.5 / v2.0.1 brick). Re-measure the produced FIT with the SAME
+# release check (mkimage-based; never the fdt pip lib). Any short image fails the
+# build here and the bad artifact is quarantined so it can't be flashed by accident.
+if [ -f "/build/output/$FRM_OUT" ] && [ -f /build/test-src/check_frm_images.sh ]; then
+    info "Anti-truncation gate: validating $FRM_OUT image sizes (mkimage)..."
+    if ! sh /build/test-src/check_frm_images.sh "/build/output/$FRM_OUT"; then
+        mv "/build/output/$FRM_OUT" "/build/output/$FRM_OUT.TRUNCATED-DO-NOT-FLASH" 2>/dev/null || true
+        die "$FRM_OUT FAILED the image-integrity gate (truncated bitstream?). Quarantined as $FRM_OUT.TRUNCATED-DO-NOT-FLASH. Refusing to ship a brick -- see RELEASING.md."
+    fi
+    info "  anti-truncation gate: PASS"
+elif [ ! -f /build/test-src/check_frm_images.sh ]; then
+    info "  (test/check_frm_images.sh not mounted -- skipping the anti-truncation gate; run it manually)"
+fi
 
 info "=================================================="
 info "Done. Firmware in /build/output (mapped to ./output on host)"

@@ -212,6 +212,13 @@ fi
 [ -n "${PREBUILT_BIT:-}" ] || die \
     "LibreSDR requires --prebuilt-bit. First run --prepare-hdl and tools/build-libresdr-hdl.ps1."
 [ -f "$PREBUILT_BIT" ] || die "Prebuilt bitstream not found: $PREBUILT_BIT"
+# Fail-fast anti-truncation guard: a real LibreSDR (XC7Z020) bitstream is ~2.4 MB. A
+# ~241 KB .bit is the fingerprint of an fdt-pip-lib-truncated extract and WILL brick the
+# board (cf. Pluto+ v1.5/v2.0.1). Refuse it rather than package a doomed FIT.
+_bitsz=$(stat -c %s "$PREBUILT_BIT")
+if [ "$_bitsz" -lt 400000 ]; then
+    die "PREBUILT_BIT is only ${_bitsz} bytes -- almost certainly a TRUNCATED bitstream (real is ~2.4 MB). Re-export from Vivado or extract with dumpimage/mkimage (NEVER the fdt pip lib). See RELEASING.md."
+fi
 
 # Kernel nodes/config were installed by apply_overlay.py. Configure the common
 # timing packages and services in the LibreSDR Buildroot.
@@ -325,6 +332,18 @@ cp build/rootfs.cpio.gz "$SD/ramdisk.image.gz"
 mkimage -A arm -T ramdisk -C gzip -d "$SD/ramdisk.image.gz" "$SD/uramdisk.image.gz"
 printf 'img : {[bootloader] fsbl.elf system_top.bit u-boot.elf}\n' > "$SD/boot.bif"
 cp build/libre.frm build/libre.dfu "$OUT/"
+
+# Fail-hard anti-brick gate: never let a build succeed with a truncated bitstream (the
+# Pluto+ v1.5/v2.0.1 brick). Re-measure the produced FIT with the shared release check
+# (mkimage-based; never the fdt pip lib); quarantine + fail if any image is short.
+if [ -f "$OUT/libre.frm" ] && [ -f /build/test-src/check_frm_images.sh ]; then
+    info "Anti-truncation gate: validating libre.frm image sizes (mkimage)..."
+    if ! sh /build/test-src/check_frm_images.sh "$OUT/libre.frm"; then
+        mv "$OUT/libre.frm" "$OUT/libre.frm.TRUNCATED-DO-NOT-FLASH" 2>/dev/null || true
+        die "libre.frm FAILED the image-integrity gate (truncated bitstream?). Quarantined as libre.frm.TRUNCATED-DO-NOT-FLASH. Refusing to ship a brick."
+    fi
+    info "  anti-truncation gate: PASS"
+fi
 
 sh /build/boards-src/libresdr/validate_sd.sh "$SD"
 

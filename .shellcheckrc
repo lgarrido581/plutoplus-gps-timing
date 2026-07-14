@@ -1,0 +1,8 @@
+# Repository ShellCheck policy (read from the repo root by `shellcheck`; see test/run_ci.sh).
+# These codes flag patterns that are deliberate throughout this embedded/shell codebase.
+# Disabling them keeps CI focused on real defects (syntax errors, undefined vars,
+# behavior-changing quoting) instead of style noise. Everything else stays enabled.
+disable=SC1090  # scripts source configurable paths by design (config files, Vivado settings64.sh)
+disable=SC1007  # `CDPATH= cmd` is an intentional idiom to neutralize an inherited CDPATH
+disable=SC2046  # `$(git ls-files ...)` is intentionally word-split into a file list
+disable=SC2034  # some registers/flags are parsed into vars kept for readability/debug output
