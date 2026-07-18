@@ -546,14 +546,25 @@ fi
 # Post-build script: delete buildroot's generic serial getty from inittab so the
 # GPS UART (ttyPS0) has no login console competing with gpsd. Runs AFTER the
 # getty finalize hook. USB console (ttyGS0) is left intact.
+FW_VER="${GPS_TIMING_VERSION:-unknown}"
 cat > buildroot/board/pluto/gps-post-build.sh << 'EOF'
 #!/bin/sh
 INITTAB="$1/etc/inittab"
 [ -f "$INITTAB" ] && sed -i '/# GENERIC_SERIAL$/d' "$INITTAB"
+# Login banner (/etc/motd): the stock template carries a "#BUILD#" placeholder that
+# S45msd rewrites to the sardylan base version (e.g. "v0.39") at boot. Replace the
+# placeholder now with this repo's firmware version (so S45msd's sed becomes a no-op)
+# and re-point the URL, keeping the stock Pluto+ art above.
+MOTD="$1/etc/motd"
+if [ -f "$MOTD" ]; then
+    sed -i "s|^#BUILD#$|GPS-timing firmware v@@FWVER@@ (plutoplus)|" "$MOTD"
+    sed -i "s|^https://github.com/sardylan/plutoplus$|https://github.com/lgarrido581/plutoplus-gps-timing|" "$MOTD"
+fi
 exit 0
 EOF
+sed -i "s|@@FWVER@@|$FW_VER|g" buildroot/board/pluto/gps-post-build.sh
 chmod +x buildroot/board/pluto/gps-post-build.sh
-info "  post-build: gps-post-build.sh created (removes serial getty)"
+info "  post-build: gps-post-build.sh created (getty removal + motd v$FW_VER banner)"
 
 # Force chrony + gpsd to rebuild so they pick up PPS support (via new pps-tools)
 # and the corrected gpsd device. buildroot does NOT auto-rebuild packages on a
@@ -873,6 +884,17 @@ cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /b
 # bitstream (the v1.5 / v2.0.1 brick). Re-measure the produced FIT with the SAME
 # release check (mkimage-based; never the fdt pip lib). Any short image fails the
 # build here and the bad artifact is quarantined so it can't be flashed by accident.
+# Pin the reused bitstream's identity. When we REUSE a prebuilt bit it MUST be the committed
+# known-good one -- this catches a wrong --prebuilt-bit or a stale-cache bit (the exact class
+# that ships a radio without the coincident-capture pps_counter -> pps=N/untrusted). Enforced
+# on ANY reuse path (PREBUILT_BIT set), incl. the default --hwlatch fleet build -- reusing a
+# bit never changes it, so it must match the pin. A --vivado synth legitimately produces a new
+# bit (no PREBUILT_BIT, so not enforced); --gpio-test reuses its own distinct bit, so skip it.
+PIN_FILE="/build/boards-src/plutoplus/fpga.sha256pin"
+if [ -n "${PREBUILT_BIT:-}" ] && [ "${PPS_GPIO_TEST:-0}" != "1" ] && [ -f "$PIN_FILE" ]; then
+    EXPECTED_FPGA_SHA256="$(grep -oE '^[0-9a-f]{64}$' "$PIN_FILE" | head -1)"; export EXPECTED_FPGA_SHA256
+    info "  fpga pin: enforcing known-good bitstream $EXPECTED_FPGA_SHA256"
+fi
 if [ -f "/build/output/$FRM_OUT" ] && [ -f /build/test-src/check_frm_images.sh ]; then
     info "Anti-truncation gate: validating $FRM_OUT image sizes (FDT parse)..."
     if ! sh /build/test-src/check_frm_images.sh "/build/output/$FRM_OUT"; then

@@ -100,6 +100,40 @@ PY
 
 size_of() { echo "$1" | awk -v n="$2" '$1==n {print $2; found=1} END{if(!found) print -1}'; }
 
+# sha256 of the fpga@1 image's embedded `data` (the actual bitstream bytes). Same FDT walk
+# as image_sizes, but hashes the one image whose identity matters: a wrong bitstream (e.g.
+# a plain ./docker-run.sh that pulled the stock bit instead of the coincident-capture one)
+# is byte-valid and full-size, so the floor check passes -- only the hash catches it.
+fpga_sha256() {
+    python3 - "$1" <<'PY'
+import sys, struct, hashlib
+b = open(sys.argv[1], "rb").read()
+if len(b) < 16 or b[:4] != b"\xd0\x0d\xfe\xed": sys.exit(0)
+totalsize, off_struct, off_strings = struct.unpack(">III", b[4:16])
+align4 = lambda x: (x + 3) & ~3
+FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP, FDT_NOP, FDT_END = 1, 2, 3, 4, 9
+pos, stack = off_struct, []
+try:
+    while pos < off_strings:
+        (tag,) = struct.unpack(">I", b[pos:pos+4]); pos += 4
+        if tag == FDT_BEGIN_NODE:
+            e = b.index(b"\x00", pos); stack.append(b[pos:e].decode("ascii", "replace")); pos = align4(e + 1)
+        elif tag == FDT_END_NODE: stack.pop()
+        elif tag == FDT_PROP:
+            length, nameoff = struct.unpack(">II", b[pos:pos+8]); pos += 8
+            e = b.index(b"\x00", off_strings + nameoff)
+            pname = b[off_strings + nameoff:e].decode("ascii", "replace")
+            segs = [s for s in stack if s]
+            if pname == "data" and len(segs) == 2 and segs[0] == "images" and segs[1] == "fpga@1":
+                print(hashlib.sha256(b[pos:pos+length]).hexdigest()); sys.exit(0)
+            pos = align4(pos + length)
+        elif tag == FDT_NOP: continue
+        elif tag == FDT_END: break
+        else: break
+except (struct.error, ValueError, IndexError): pass
+PY
+}
+
 echo "=== check_frm_images: $FRM ==="
 if ! strip_and_check "$FRM" "$tmp/new.itb"; then
     echo "FAIL: $FRM md5 trailer does not match its FIT.itb -- malformed .frm (update_frm.sh would reject)"
@@ -121,6 +155,28 @@ check_floor() {
 check_floor "fpga@1"        "$FPGA_MIN"
 check_floor "linux_kernel@1" "$KERNEL_MIN"
 check_floor "ramdisk@1"      "$RAMDISK_MIN"
+
+# fpga@1 bitstream identity -- printed always (visible in every build/release log), and if a
+# known-good hash is pinned via $EXPECTED_FPGA_SHA256, FAIL on mismatch. A full-size-but-WRONG
+# bitstream (e.g. the stock bit pulled by a bare ./docker-run.sh, lacking the coincident-capture
+# pps_counter) passes every OTHER check here; the hash is the only gate that catches it.
+FPGA_SHA=$(fpga_sha256 "$tmp/new.itb")
+if [ -n "$FPGA_SHA" ]; then
+    echo "  fpga@1 sha256 = $FPGA_SHA"
+    if [ -n "${EXPECTED_FPGA_SHA256:-}" ]; then
+        if [ "$FPGA_SHA" = "$EXPECTED_FPGA_SHA256" ]; then
+            echo "  ok: fpga@1 matches the pinned known-good bitstream"
+        else
+            echo "FAIL: fpga@1 sha256 != pinned known-good ($EXPECTED_FPGA_SHA256)"
+            echo "      NOT the validated bitstream -- it likely LACKS the coincident-capture pps_counter"
+            echo "      (radio boots pps=N / GPS-untrusted). Rebuild reusing the known-good bit"
+            echo "      (--prebuilt-bit output/working.bit); update the pin ONLY if you changed gateware."
+            rc=1
+        fi
+    fi
+else
+    echo "  (fpga@1 sha256: could not extract -- FIT missing fpga@1?)"
+fi
 
 # fit_size u-boot must be set to (bootability invariant; see FLASHING.md)
 ITB_SZ=$(wc -c < "$tmp/new.itb")

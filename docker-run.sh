@@ -88,6 +88,44 @@ if [ -n "$VIVADO_HOST" ]; then
     VIVADO_MOUNT="-v ${VIVADO_HOST}:${VIVADO_HOST}:ro -e VIVADO_PATH=${VIVADO_HOST} --tmpfs /sys"
 fi
 
+# --- Bitstream-source guardrail (prevents silently shipping the WRONG gateware) --------
+# A rootfs/services-only rebuild MUST reuse the *validated* bitstream. With neither
+# --vivado (full synth) nor --prebuilt-bit given, the build would download/extract an
+# unverified stock bit that LACKS the coincident-capture pps_counter -- the radio then
+# boots pps=N / GPS-untrusted even though chrony is PPS-locked, and it is NOT obvious why.
+# So: default to the committed known-good bit, and REFUSE to build an unverified one.
+# Pass --vivado ONLY for an intentional gateware change (then refresh output/working.bit).
+if [ -z "$VIVADO_HOST" ] && [ -z "$PREBUILT_BIT_HOST" ] && [ "$PREPARE_HDL" != "1" ]; then
+    case "$TARGET" in
+        plutoplus) KNOWN_GOOD_BIT="output/working.bit" ;;
+        libresdr)  KNOWN_GOOD_BIT="output/libresdr-hdl/system_top.bit" ;;
+        *)         KNOWN_GOOD_BIT="" ;;
+    esac
+    if [ -n "$KNOWN_GOOD_BIT" ] && [ -f "$KNOWN_GOOD_BIT" ]; then
+        PREBUILT_BIT_HOST="$KNOWN_GOOD_BIT"
+        echo "[*] No --vivado/--prebuilt-bit given -> reusing the known-good bitstream:"
+        echo "      $KNOWN_GOOD_BIT   (services/rootfs-only rebuild; use --vivado to change gateware)"
+        # output/working.bit is the coincident-capture / hardware-PPS-latch bitstream, so also
+        # build its MATCHING services: S70xocorrect (GPS sample-clock discipline) is only written
+        # when PPS_HWLATCH=1. Without this, a clean-cache rebuild ships the right bit but silently
+        # omits xo_correction. (No synth runs on the --prebuilt-bit path, so the hwlatch-timing
+        # caveat that applies to a --vivado build does NOT apply here.)
+        if [ "$TARGET" = "plutoplus" ]; then
+            case "$EXTRA_ENV" in
+                *PPS_HWLATCH*) : ;;
+                *) EXTRA_ENV="$EXTRA_ENV -e PPS_HWLATCH=1"
+                   echo "      + PPS_HWLATCH=1 (writes the matching S70xocorrect sample-clock service)" ;;
+            esac
+        fi
+    else
+        echo "ERROR: no bitstream source, and no known-good bit at '${KNOWN_GOOD_BIT:-<none>}'." >&2
+        echo "       Pass --prebuilt-bit <system_top.bit> (reuse) or --vivado <XilinxDir> (full synth)." >&2
+        echo "       Refusing to synthesize/download an UNVERIFIED bit -- that ships a radio without" >&2
+        echo "       the coincident-capture pps_counter. See RELEASING.md / docs/BUILD.md." >&2
+        exit 1
+    fi
+fi
+
 # Mount a prebuilt bitstream (reuse) into the container if provided.
 PREBUILT_MOUNT=""
 if [ -n "$PREBUILT_BIT_HOST" ]; then
