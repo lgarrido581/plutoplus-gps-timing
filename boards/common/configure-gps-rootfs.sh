@@ -150,6 +150,9 @@ if [ "$GPS_UART" = "/dev/ttyUL0" ] && [ -f "\$INITTAB" ] &&
    ! grep -q '^ttyPS0:' "\$INITTAB"; then
     echo 'ttyPS0::respawn:/sbin/getty -L ttyPS0 115200 vt100 # Debug console' >> "\$INITTAB"
 fi
+# Show the GPS-timing firmware version on the login banner, keeping the stock board
+# branding above it (idempotent so a rebuild doesn't stack duplicate lines).
+[ -f "\$1/etc/issue" ] && ! grep -q 'GPS-timing firmware' "\$1/etc/issue" 2>/dev/null && echo "GPS-timing firmware v${GPS_TIMING_VERSION:-unknown} ($BOARD_NAME)" >> "\$1/etc/issue"
 exit 0
 EOF
 chmod +x "$POST"

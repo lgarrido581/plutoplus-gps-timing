@@ -49,6 +49,13 @@
 #include <ctime>
 #include <string>
 
+// Firmware release version (this repo's tag, e.g. "2.0.3"). Baked in at build time via
+// -DGPS_TIMING_VERSION from the repo VERSION file (docker-run.sh -> docker-build-inner.sh),
+// and reported in the snapshot "fw_version" so a consumer knows the exact release running.
+#ifndef GPS_TIMING_VERSION
+#define GPS_TIMING_VERSION "unknown"
+#endif
+
 // ---------------------------------------------------------------------------
 // pps_counter AXI register map (raw devmem space; no DT node -- same as the CGI).
 // ---------------------------------------------------------------------------
@@ -527,6 +534,7 @@ static std::string build_snapshot() {
     char hdr[320];
     snprintf(hdr, sizeof hdr,
              "{\"schema\":\"dsn.health/1\",\"api\":\"dsn.pluto_zmq/1\","
+             "\"fw_version\":\"" GPS_TIMING_VERSION "\","
              "\"node_id\":%s,\"board\":%s,\"t_unix\":%ld,\"uptime_s\":%s,",
              json_str(g_node_id).c_str(), json_str(g_board_id).c_str(),
              (long)time(nullptr), read_uptime_s().c_str());

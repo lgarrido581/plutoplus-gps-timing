@@ -16,6 +16,7 @@ Z=buildroot/package/pluto-zmqd
 mkdir -p "$Z"
 cp /build/services-src/pluto_zmqd.cpp "$Z/"
 cp /build/services-src/S65zmqapi "$Z/"
+printf '%s' "${GPS_TIMING_VERSION:-unknown}" > "$Z/FW_VERSION"
 cat > "$Z/Config.in" <<'EOF'
 config BR2_PACKAGE_PLUTO_ZMQD
 	bool "pluto-zmqd"
@@ -29,7 +30,7 @@ PLUTO_ZMQD_SITE = $(TOPDIR)/package/pluto-zmqd
 PLUTO_ZMQD_SITE_METHOD = local
 PLUTO_ZMQD_DEPENDENCIES = zeromq
 define PLUTO_ZMQD_BUILD_CMDS
-	$(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++11 -O2 -pthread -o $(@D)/pluto_zmqd $(@D)/pluto_zmqd.cpp -lzmq
+	$(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++11 -O2 -pthread -DGPS_TIMING_VERSION='"$(shell cat $(PLUTO_ZMQD_SITE)/FW_VERSION)"' -o $(@D)/pluto_zmqd $(@D)/pluto_zmqd.cpp -lzmq
 endef
 define PLUTO_ZMQD_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/pluto_zmqd $(TARGET_DIR)/usr/bin/pluto_zmqd

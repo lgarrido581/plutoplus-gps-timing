@@ -291,6 +291,10 @@ if [ -n "$BR_CFG" ] && [ -f /build/services-src/pluto_zmqd.cpp ]; then
     mkdir -p "$PKG"
     cp /build/services-src/pluto_zmqd.cpp "$PKG/pluto_zmqd.cpp"
     cp /build/services-src/S65zmqapi      "$PKG/S65zmqapi"
+    # Bake this repo's release version (docker-run.sh VERSION -> GPS_TIMING_VERSION env)
+    # so pluto_zmqd reports it in the snapshot "fw_version" and the banner shows it
+    # (the git-describe VERSION is the fw-0.39 base, not this repo's release tag).
+    printf '%s' "${GPS_TIMING_VERSION:-unknown}" > "$PKG/FW_VERSION"
     cat > "$PKG/Config.in" << 'EOF'
 config BR2_PACKAGE_PLUTO_ZMQD
 	bool "pluto-zmqd"
@@ -314,6 +318,7 @@ PLUTO_ZMQD_LICENSE = MIT
 
 define PLUTO_ZMQD_BUILD_CMDS
 	$(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++11 -O2 -pthread \
+		-DGPS_TIMING_VERSION='"$(shell cat $(PLUTO_ZMQD_SITE)/FW_VERSION)"' \
 		-o $(@D)/pluto_zmqd $(@D)/pluto_zmqd.cpp -lzmq
 endef
 

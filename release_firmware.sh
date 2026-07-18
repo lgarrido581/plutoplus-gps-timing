@@ -14,6 +14,12 @@
 set -eu
 
 TAG="${1:-}"; [ -n "$TAG" ] || { echo "usage: $0 <tag> [pluto.frm] [libre.frm]" >&2; exit 1; }
+# The release tag MUST equal the VERSION source of truth, so the firmware's baked/reported
+# fw_version matches the release (bump VERSION in the same PR as the change).
+if [ -f VERSION ]; then
+    _want="v$(cat VERSION)"
+    [ "$TAG" = "$_want" ] || { echo "error: tag '$TAG' != VERSION ($_want) -- bump VERSION or fix the tag" >&2; exit 1; }
+fi
 PLUTO="${2:-output/pluto.frm}"
 LIBRE="${3:-output/libre.frm}"
 REPO="${GPS_REPO:-lgarrido581/plutoplus-gps-timing}"

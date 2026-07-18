@@ -52,6 +52,12 @@ esac
 [ "$TARGET" = "libresdr" ] && EXTRA_ENV="$EXTRA_ENV -e BUILD_TARGET=libresdr"
 [ "$PREPARE_HDL" = 1 ] && EXTRA_ENV="$EXTRA_ENV -e PREPARE_HDL=1"
 
+# Firmware release version = this repo's VERSION file (single source of truth). Passed
+# into the build so pluto_zmqd bakes it (-DGPS_TIMING_VERSION) and the login banner shows
+# it -- the git-describe VERSION is the fw-0.39 base, not this repo's release tag.
+FW_VER="$(cat VERSION 2>/dev/null || echo unknown)"
+EXTRA_ENV="$EXTRA_ENV -e GPS_TIMING_VERSION=$FW_VER"
+
 # Separate named volumes prevent one target from wiping the other target's clone.
 SRC_VOLUME="gps-timing-${TARGET}-src-cache"
 docker volume create "$SRC_VOLUME" &>/dev/null
