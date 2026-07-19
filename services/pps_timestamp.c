@@ -131,8 +131,25 @@ bool pps_ts_latch(const pps_ts_t *p, uint32_t *count, uint32_t *seq, uint64_t *g
         cnt = p->nominal_cnt_hz;
     if (count)  *count  = lc;
     if (seq)    *seq    = ls;
-    if (gps_ns) *gps_ns = last_pps_gps_ns() +
-                          (uint64_t)((double)(lc - ppsc) / cnt * 1e9 + 0.5);
+    if (gps_ns) {
+        /* SIGNED latch-vs-PPS delta. lc and ppsc are free-running uint32 counts; an
+         * unsigned (lc - ppsc) wraps to ~2^32 whenever the latch edge predates the
+         * newest PPS (a stale latch, or a PPS landing between edge and read). That
+         * wrap divided by cnt_hz stamped anchors ~frac(2^32/cnt_hz) into the second
+         * (+0.4967 s at 10 MHz, +0.7484 s at 20 MHz) -- the intermittent late-capture
+         * label. Signed, a latch just before the PPS (a read racing the edge by ms)
+         * resolves to the correct earlier time; anything staler cannot be this
+         * capture's DMA-start edge, so report no-latch (gps_ns = 0) and let the caller
+         * fall back to the frame-grid snap, which is grid-correct. */
+        int32_t d = (int32_t)(lc - ppsc);
+        double  period = cnt;                       /* ~1 s of cnt_clk counts */
+        if ((double)d <= -(period * 0.125) || (double)d >= period * 1.125) {
+            *gps_ns = 0;                            /* stale/implausible latch */
+        } else {
+            int64_t off_ns = (int64_t)((double)d / cnt * 1e9 + (d >= 0 ? 0.5 : -0.5));
+            *gps_ns = (uint64_t)((int64_t)last_pps_gps_ns() + off_ns);
+        }
+    }
     return true;
 }
 

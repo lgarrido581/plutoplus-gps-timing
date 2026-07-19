@@ -357,17 +357,30 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
      * count of sample[0] in hardware on the channel1 rising edge -> SAMPLE-EXACT, no
      * host read race. Else snap the software anchor to the GPS frame grid. (From
      * iq_capture.c; the non-tdd path keeps the pre-refill anchor as sample[0].) */
+    /* Latch-path debug taps, surfaced in the meta (additive fields; consumers ignore
+     * unknown keys). latch_off_signed = (int32)(LATCH_COUNT - PPS_COUNT@read): negative
+     * means the latch edge predates the newest PPS -- the uint32 sub-second math then
+     * wraps to ~frac(2^32/cnt_hz) (the observed +0.497 s / +0.748 s anchor slips). */
+    uint32_t dbg_lc = 0, dbg_lseq = 0, dbg_ppsc = 0;
+    uint32_t dbg_lseq_prev = lseq_prev;
+    int32_t  dbg_latch_off = 0;
+    uint64_t dbg_lgps = 0;
     if (armed && have_pps) {
         uint32_t lc = 0, lseq = 0; uint64_t lgps = 0;
         pps_ts_latch(&pps, &lc, &lseq, &lgps);
+        dbg_lc = lc; dbg_lseq = lseq; dbg_lgps = lgps;
         if (lseq != lseq_prev && lgps != 0) {              /* latch fired for this capture */
             pps_anchor_t now_a; pps_ts_anchor(&pps, &now_a);
+            dbg_ppsc = now_a.pps_count;
+            dbg_latch_off = (int32_t)(lc - now_a.pps_count);
             anchor = now_a;
             anchor.gps_ns = lgps;                          /* hardware, sample-exact */
             anchor.live_count = lc;
             method = "tdd_pps_latch";
         } else {                                           /* snap to the frame grid */
             pps_anchor_t now_a; pps_ts_anchor(&pps, &now_a);
+            dbg_ppsc = now_a.pps_count;
+            dbg_latch_off = (int32_t)(lc - now_a.pps_count);
             double cnt = (double)now_a.cnt_hz;
             if (cnt < nominal_cnt * 0.5 || cnt > nominal_cnt * 1.5) cnt = nominal_cnt;
             uint64_t last_pps_ns = now_a.gps_ns -
@@ -425,7 +438,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
                  "    \"gpsanchor:antenna_position\": [%.8f, %.8f, %.3f],\n",
                  req->lat, req->lon, req->alt);
 
-    size_t metacap = 2048;
+    size_t metacap = 3072;
     char *meta = (char *)malloc(metacap);
     if (!meta) { rc = fail(out, "oom (meta)"); goto cleanup; }
     snprintf(meta, metacap,
@@ -457,7 +470,13 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"gpsanchor:pps_count\": %u,\n"
       "      \"gpsanchor:pps_seq\": %u,\n"
       "      \"gpsanchor:second_source\": \"%s\",\n"
-      "      \"gpsanchor:coarse_skew_s\": %d\n"
+      "      \"gpsanchor:coarse_skew_s\": %d,\n"
+      "      \"gpsanchor:latch_count\": %u,\n"
+      "      \"gpsanchor:latch_seq\": %u,\n"
+      "      \"gpsanchor:latch_seq_prev\": %u,\n"
+      "      \"gpsanchor:latch_gps_ns\": %llu,\n"
+      "      \"gpsanchor:pps_count_at_read\": %u,\n"
+      "      \"gpsanchor:latch_off_signed\": %ld\n"
       "    }\n"
       "  ],\n"
       "  \"annotations\": []\n"
@@ -466,7 +485,9 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       anchor.present ? "true" : "false", xo_ppm, degraded ? "true" : "false",
       actual_lo, dt, (unsigned long long)anchor.gps_ns, anchor.cnt_hz,
       method, anchor.live_count, anchor.pps_count, anchor.pps_seq,
-      second_src, coarse_skew_s);
+      second_src, coarse_skew_s,
+      dbg_lc, dbg_lseq, dbg_lseq_prev, (unsigned long long)dbg_lgps,
+      dbg_ppsc, (long)dbg_latch_off);
 
     /* copy the IQ out of the iio buffer (freed below). */
     uint8_t *iqcopy = (uint8_t *)malloc(bytes ? bytes : 1);
