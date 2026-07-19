@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.0.4 — signed latch delta (anchor-label slip fix)
+
+- **Fixed the intermittent late-capture anchor label** (+0.4967 s at a 10 MHz cnt_clk,
+  +0.7484 s at 20 MHz — exactly frac(2^32/cnt_hz)): `pps_ts_latch` computed the DMA-start
+  latch sub-second with an unsigned 32-bit `LATCH_COUNT - PPS_COUNT`, which wraps whenever
+  the latch predates the newest PPS. The delta is now signed with a staleness gate; a
+  stale/implausible latch reports no-latch and the caller falls back to the frame-grid
+  snap. Services-only — the FPGA bitstream is unchanged.
+- Capture metadata now exposes the raw latch registers (`gpsanchor:latch_count`,
+  `latch_seq`, `latch_seq_prev`, `latch_gps_ns`, `pps_count_at_read`,
+  `latch_off_signed`) so a stale-latch event is diagnosable from the consumer side.
+
+
 ## Unreleased — LibreSDR target
 
 - Added `--target libresdr` alongside the backward-compatible Pluto+ default.
