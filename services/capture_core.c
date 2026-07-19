@@ -415,11 +415,22 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         const uint64_t NS = 1000000000ULL;
         uint64_t sub_ns  = anchor.gps_ns % NS;             /* HW phase within the second */
         long long os_sec = (long long)(anchor.gps_ns / NS);
+        /* PPS-edge boundary fold. A capture window opening AT the PPS edge (offset 0)
+         * can latch its DMA-start count one cnt_clk BEFORE the PPS counter re-latches
+         * (a +-1-count race, ~50% of boots) -> the signed latch math correctly labels
+         * the edge (N-1).999999900 -- 100 ns early, NOT a second late. Folding the
+         * near-wrap fraction into the next second keeps the trusted-second rebase and
+         * the coarse-skew check on second N with a ~-100 ns sub-second, instead of
+         * stamping t0 + 0.9999999 s (observed as a spurious "1000 ms slip" label and
+         * a false coarse-skew degraded flag). Real window offsets are <<0.5 s, so the
+         * NS/2 threshold cannot fold a legitimate fraction. */
+        long long sub_signed = (long long)sub_ns;
+        if (sub_ns > NS / 2) { sub_signed -= (long long)NS; os_sec += 1; }
         double gate = req->t0_gps - ARM_LEAD_S;            /* arm point; gate = next PPS >= this */
         long long t0_sec = (long long)gate;                /* floor (gate is positive) ... */
         if ((double)t0_sec < gate) t0_sec += 1;            /* ... -> ceil = the gated PPS second */
         coarse_skew_s = (int)(os_sec - t0_sec);
-        anchor.gps_ns = (uint64_t)t0_sec * NS + sub_ns;    /* trusted second + HW sub-second */
+        anchor.gps_ns = (uint64_t)(t0_sec * (long long)NS + sub_signed); /* trusted second + HW sub-second */
         second_src = "t0_gps";
         if (coarse_skew_s != 0)
             fprintf(stderr, "pluto_ctld: coarse-second skew %+d s (OS %lld vs gated t0 %lld) -- "
