@@ -23,9 +23,15 @@ the two build variants, and what the build actually changes.
 
 | Command | Produces |
 |---|---|
-| `bash docker-run.sh` | **Base** `pluto.frm` (GPS system-time firmware). No Vivado, no bitstream. |
-| `bash docker-run.sh --hwlatch …` | Base **+ FPGA `pps_counter`** (F20 hardware PPS latch + auto-started `xo_correction`). **Needs a bitstream — supply it one of the two ways below.** |
-| `bash docker-run.sh --gpio-test …` | I/O-voltage test build → `pluto-gpiotest.frm` (also needs a bitstream). |
+| `bash docker-run.sh` | **Fleet `pluto.frm`.** Reuses the committed known-good `output/working.bit` (coincident-capture / FPGA `pps_counter`, F20 hardware PPS latch) **+** its `PPS_HWLATCH=1` services (`S70xocorrect` `xo_correction`). No Vivado. Exactly equivalent to `--prebuilt-bit output/working.bit --hwlatch`. |
+| `bash docker-run.sh --vivado <XilinxPath> --hwlatch` | Same firmware, but **re-synthesizes** the bitstream from HDL — use this for a gateware change, then refresh `output/working.bit` + `boards/plutoplus/fpga.sha256pin`. |
+| `bash docker-run.sh --gpio-test …` | I/O-voltage test build → `pluto-gpiotest.frm`. |
+
+> A bare run **never** silently synthesizes or downloads a bit: it reuses `output/working.bit`, or
+> **refuses to build** if that's missing. Every build prints `fpga@1 sha256` and fails if it ≠
+> `boards/plutoplus/fpga.sha256pin`. This is the guardrail against the class of bug where a stock
+> bit with **no `pps_counter`** ships and the radio boots `pps=N` / GPS-untrusted for no obvious
+> reason. `output/working.bit` = the coincident-capture bit, sha256 `4c80a8c4…d87d0f`.
 
 The equivalent explicit default is `bash docker-run.sh --target plutoplus`.
 `--target libresdr` selects a separate pinned source cache and never reuses or

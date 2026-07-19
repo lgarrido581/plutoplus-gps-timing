@@ -1,0 +1,5 @@
+# sha256 of the known-good Pluto+ fpga@1 bitstream (the coincident-capture system_top.bit,
+# a.k.a. output/working.bit). check_frm_images.sh FAILs a reuse build whose fpga@1 differs.
+# Update this ONLY when you intentionally change gateware via a --vivado build (and re-validate
+# pps_counter on hardware). A mismatch on the reuse path means the WRONG bit was pulled.
+4c80a8c41276e18cde49ae8b7d4561dd02172f6fbfaf5d1950354f1884d87d0f

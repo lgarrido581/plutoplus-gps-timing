@@ -11,20 +11,32 @@ downstream application belongs here.
 
 ## Building `pluto.frm`
 
-`./docker-run.sh` builds everything in Docker and emits `output/pluto.frm`. Two cases:
+`./docker-run.sh` builds everything in Docker and emits `output/pluto.frm`. It **never**
+implicitly synthesizes or downloads a bitstream — a bare run reuses the committed known-good bit,
+so you cannot accidentally ship the wrong gateware. Two cases:
 
-- **Services / kernel / rootfs change only (no gateware):** plain `./docker-run.sh` — no Vivado
-  needed. This is the common case (the timing daemons, capture services, `flash_frm.py`).
+- **Services / kernel / rootfs change only (no gateware change):** plain `./docker-run.sh` — no
+  Vivado needed. It auto-reuses `output/working.bit` (the coincident-capture / hardware-PPS-latch
+  bitstream) **and** builds the matching `PPS_HWLATCH=1` services (`S70xocorrect` sample-clock
+  discipline). This is the common case (timing daemons, capture services, `flash_frm.py`, the login
+  banner). It is exactly equivalent to `./docker-run.sh --prebuilt-bit output/working.bit --hwlatch`.
 - **Any HDL / block-design change (new bitstream):** the `system_top.bit` must be synthesized in
   **Vivado 2022.2** (the ADI HDL is a `2022_r2` base; set `ADI_IGNORE_VERSION_CHECK=1` if your
-  Vivado version trips the check). Two ways to get the bit:
-  - `./docker-run.sh --vivado <path-to-Xilinx>` — mount a Linux Vivado install and synth
-    in-container (full build), **or**
-  - synth `system_top.bit` with your own local Vivado, then inject it:
+  Vivado version trips the check):
+  - `./docker-run.sh --vivado <path-to-Xilinx> --hwlatch` — synth in-container (full build), **or**
+  - synth `system_top.bit` locally, then inject it:
     `./docker-run.sh --prebuilt-bit <system_top.bit> --hwlatch`.
 
-  `--hwlatch` sets `PPS_HWLATCH=1` (hardware PPS latch on the F20 input). A pure services change
-  does **not** need a new bitstream — reuse the last `system_top.bit` with `--prebuilt-bit`.
+  After validating a *new* bit on hardware, refresh `output/working.bit` **and** the pinned hash in
+  `boards/plutoplus/fpga.sha256pin` in the same commit. `--hwlatch` sets `PPS_HWLATCH=1` (F20
+  hardware PPS latch + the `S70xocorrect` sample-clock service).
+
+> **Guardrail — why a bare `./docker-run.sh` is safe now.** The old default silently pulled a
+> *stock* bit with **no `pps_counter`**; the radio then boots `pps=N` / GPS-untrusted even though
+> chrony is PPS-locked, and nothing tells you why. Now the script refuses to build without a
+> bitstream source (defaulting to `output/working.bit`), every build prints `fpga@1 sha256`, and
+> `check_frm_images.sh` **fails the build** if that hash ≠ `boards/plutoplus/fpga.sha256pin`.
+> `output/working.bit` = the coincident-capture bit, sha256 `4c80a8c4…d87d0f`.
 
 LibreSDR target: `--target libresdr`; its HDL is prepared with `tools/build-libresdr-hdl.ps1`
 (native Windows Vivado) then passed via `--prebuilt-bit` — see the usage header in

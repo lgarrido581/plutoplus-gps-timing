@@ -150,6 +150,14 @@ if [ "$GPS_UART" = "/dev/ttyUL0" ] && [ -f "\$INITTAB" ] &&
    ! grep -q '^ttyPS0:' "\$INITTAB"; then
     echo 'ttyPS0::respawn:/sbin/getty -L ttyPS0 115200 vt100 # Debug console' >> "\$INITTAB"
 fi
+# Login banner (/etc/motd): the stock template carries a "#BUILD#" placeholder that
+# S45msd rewrites to the sardylan base version at boot. Replace it now with this
+# repo's firmware version (so S45msd's sed no-ops) and re-point the URL.
+MOTD="\$1/etc/motd"
+if [ -f "\$MOTD" ]; then
+    sed -i "s|^#BUILD#\$|GPS-timing firmware v${GPS_TIMING_VERSION:-unknown} ($BOARD_NAME)|" "\$MOTD"
+    sed -i "s|^https://github.com/sardylan/plutoplus\$|https://github.com/lgarrido581/plutoplus-gps-timing|" "\$MOTD"
+fi
 exit 0
 EOF
 chmod +x "$POST"

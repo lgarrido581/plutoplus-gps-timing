@@ -35,6 +35,20 @@ if command -v python3 >/dev/null 2>&1; then
     for p in $(git ls-files '*.py'); do python3 -m py_compile "$p" || bad "py_compile $p"; done
 else echo "  (python3 not installed -- skipped)"; fi
 
+step "firmware version (single source of truth + reporting wiring)"
+if [ -f VERSION ]; then
+    _ver=$(cat VERSION)
+    echo "$_ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        || bad "VERSION '$_ver' is not a single X.Y.Z semver (one version per PR)"
+    grep -q '"fw_version"' services/pluto_zmqd.cpp \
+        || bad "pluto_zmqd.cpp no longer reports fw_version in the snapshot"
+    grep -q 'GPS_TIMING_VERSION' docker-build-inner.sh \
+        || bad "docker-build-inner.sh no longer bakes -DGPS_TIMING_VERSION"
+    echo "  VERSION=$_ver, reporting wiring present"
+else
+    bad "VERSION file missing (single source of truth for the release version)"
+fi
+
 step "unit/model tests"
 [ -f hdl/pps_counter/test_xo_correct.sh ] && { sh hdl/pps_counter/test_xo_correct.sh || bad "test_xo_correct"; }
 [ -f hdl/pps_counter/test_tdd_window_model.py ] && command -v python3 >/dev/null 2>&1 && \
