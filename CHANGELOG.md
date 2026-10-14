@@ -13,9 +13,13 @@
   and the attributes are metadata on Pluto+ and LibreSDR, so their logic is
   unchanged and the pinned bitstreams stay valid.
 - Added a no-make Python build driver (`build_hdl.py`, with a license-free
-  `--skip-synthesis` mode), an xsim testbench for the capture-start path,
-  `system.dtb` and `BOOT.BIN` recipes, and `som/ppsc.py` (register status, lock
-  watch, GPS-gated capture, chrony SOCK refclock feeder).
+  `--skip-synthesis` mode), an xsim testbench for the capture-start path (Linux
+  and Windows runners), a `system.dtb` recipe that layers `gps.dtsi` on the
+  Kuiper board variant you boot (`BASE=`), a `BOOT.BIN` recipe, and
+  `som/ppsc.py` (register status, lock watch, GPS-gated capture, chrony SOCK
+  refclock feeder).
+- `docs/ADRV9009_ZU11EG.md` is a hand-off guide: prerequisites, build, SD card,
+  wiring, bring-up checklist, troubleshooting, and what to report.
 - Not yet synthesized or tested on hardware.
 
 ## v2.0.4 — signed latch delta (anchor-label slip fix)
