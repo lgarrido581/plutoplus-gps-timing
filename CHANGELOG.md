@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — ADRV9009-ZU11EG target (experimental)
+
+- Added `boards/adrv9009zu11eg`: patches ADI's `adrv9009zu11eg/adrv2crr_fmc`
+  project (HDL `2023_R2_p1`) with `pps_counter` on `core_clk_b`, the GPS PPS on
+  PMOD0 pin 1, and `pps_rx_sync_mux`, which gives the RX transport core's
+  external sync the PPS window while a GPS capture is armed and SYSREF
+  otherwise. Registers at `0x9C46_0000` in Linux.
+- `pps_counter.v` gains a `tdd_armed` output and explicit `X_INTERFACE_INFO`
+  attributes on its AXI4-Lite ports (Vivado 2023.2's module-reference
+  inference otherwise builds no `s_axi` interface). The output is unconnected
+  and the attributes are metadata on Pluto+ and LibreSDR, so their logic is
+  unchanged and the pinned bitstreams stay valid.
+- Added a no-make Python build driver (`build_hdl.py`, with a license-free
+  `--skip-synthesis` mode), an xsim testbench for the capture-start path,
+  `system.dtb` and `BOOT.BIN` recipes, and `som/ppsc.py` (register status, lock
+  watch, GPS-gated capture, chrony SOCK refclock feeder).
+- Not yet synthesized or tested on hardware.
+
 ## v2.0.4 — signed latch delta (anchor-label slip fix)
 
 - **Fixed the intermittent late-capture anchor label** (+0.4967 s at a 10 MHz cnt_clk,

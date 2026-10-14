@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * plutoplus-gps-timing: ADRV9009-ZU11EG Rev.B on ADRV2CRR-FMC Rev.B with the
+ * GPS pps_counter (boards/adrv9009zu11eg). Builds against ADI Linux 2023_R2,
+ * matching ADI HDL 2023_R2_p1; see build_dtb.sh.
+ */
+#include "zynqmp-adrv9009-zu11eg-revb-adrv2crr-fmc-revb.dts"
+
+/ {
+	/*
+	 * GPS PPS on PMOD0 pin 1: pmod0_d0 = EMIO GPIO 12 = gpio 90 (MIO 0-77,
+	 * then EMIO). The same pin feeds pps_counter in the FPGA.
+	 * Binds only with CONFIG_PPS_CLIENT_GPIO, which ADI's adi_zynqmp_defconfig
+	 * leaves off; without it this node is inert and system time comes from
+	 * som/ppsc.py chrony (the FPGA counter as a chrony SOCK refclock).
+	 */
+	pps-gps {
+		compatible = "pps-gpio";
+		gpios = <&gpio 90 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&fpga_axi {
+	/*
+	 * Registers of the GPS pps_counter (HDL 0x7C460000, remapped by ADI's
+	 * ZynqMP interconnect). Software maps it through /dev/mem; the node
+	 * records the address and lets uio_pdrv_genirq bind if it is loaded with
+	 * of_id=generic-uio.
+	 */
+	pps_counter: pps-counter@9c460000 {
+		compatible = "generic-uio";
+		reg = <0x0 0x9c460000 0x1000>;
+	};
+};

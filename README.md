@@ -7,7 +7,9 @@ no local Xilinx install is needed for the base firmware.
 
 The repository also has a separate **LibreSDR Rev.5 (Zynq‑7020)** target. It
 shares the timing/services code but uses its own pinned source cache, FPGA
-overlay, Vivado 2022.2 build, and SD-card artifacts.
+overlay, Vivado 2022.2 build, and SD-card artifacts. An experimental
+**ADRV9009-ZU11EG RF-SOM** target adds the same `pps_counter` to ADI's
+reference design for that board (see below).
 
 > ✅ **Verified on hardware.** Stratum‑1, PPS‑disciplined system clock (`chronyc tracking` →
 > `Leap status: Normal`, ref `PPS`, within a few hundred ns of GPS). On the `--hwlatch` build the
@@ -23,6 +25,7 @@ overlay, Vivado 2022.2 build, and SD-card artifacts.
 [LibreSDR target](docs/LIBRESDR.md) ·
 [LibreSDR QSPI](docs/LIBRESDR_QSPI.md) ·
 [LibreSDR recovery](docs/LIBRESDR_RECOVERY.md) ·
+[ADRV9009-ZU11EG target](docs/ADRV9009_ZU11EG.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
 [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) · [ZMQ API ICD](docs/PLUTO_ZMQ_ICD.md) · [ZMQ capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)
@@ -166,6 +169,15 @@ does not overwrite the FSBL, U-Boot, or U-Boot environment. See
 
 The detailed pinout, prerequisites, acceptance checklist, and recovery procedure
 are in [LibreSDR build and bring-up](docs/LIBRESDR.md).
+
+### ADRV9009-ZU11EG RF-SOM (experimental)
+
+Adds `pps_counter` to ADI's `adrv9009zu11eg/adrv2crr_fmc` reference design
+(HDL `2023_R2_p1`, Vivado 2023.2) and produces a `BOOT.BIN` + `system.dtb` for
+an ADI Kuiper SD card. The block design and capture-start RTL are verified
+without a license; synthesis for `xczu11eg` needs a Vivado Enterprise or
+evaluation license. Build steps, wiring, and the bring-up checklist are in
+[ADRV9009-ZU11EG build and bring-up](docs/ADRV9009_ZU11EG.md).
 
 ## Flash (normal update of a working device)
 
