@@ -66,28 +66,62 @@ module pps_counter #(
     // 1-cyc pulse on every PPS rising edge (l_clk domain). Independent of the TDD
     // frame logic -> drives ADI axi_tdd's sync_in to GPS-anchor its frame counter.
     output wire                              pps_tick,
+    // High while the PPS window drives tdd_enable (TDD_CTRL enable & drive_pins).
+    // For designs whose capture-start input is shared with another source (e.g. a
+    // JESD SYSREF into an RX transport layer's external sync): select the PPS
+    // window while this is high. Unused on Pluto+/LibreSDR.
+    output wire                              tdd_armed,
 
     // ---- AXI4-Lite slave (FCLK / s_axi_aclk domain) ----
+    // Explicit interface attributes. In some projects (seen in ADI's 2023_R2
+    // ZynqMP designs, Vivado 2023.2) module-reference inference takes the
+    // parameter-sized ports for an interface array and builds no s_axi interface,
+    // so ad_cpu_interconnect fails. They name the interface that inference
+    // produces where it works (s_axi, AXI4-Lite, same clock/reset). Metadata only.
+    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi, ASSOCIATED_RESET s_axi_aresetn" *)
     input  wire                              s_axi_aclk,
+    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 s_axi_aresetn RST" *)
+    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
     input  wire                              s_axi_aresetn,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi AWADDR" *)
+    (* X_INTERFACE_PARAMETER = "PROTOCOL AXI4LITE" *)
     input  wire [C_S_AXI_ADDR_WIDTH-1:0]     s_axi_awaddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi AWPROT" *)
     input  wire [2:0]                        s_axi_awprot,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi AWVALID" *)
     input  wire                              s_axi_awvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi AWREADY" *)
     output reg                               s_axi_awready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi WDATA" *)
     input  wire [C_S_AXI_DATA_WIDTH-1:0]     s_axi_wdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi WSTRB" *)
     input  wire [(C_S_AXI_DATA_WIDTH/8)-1:0] s_axi_wstrb,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi WVALID" *)
     input  wire                              s_axi_wvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi WREADY" *)
     output reg                               s_axi_wready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi BRESP" *)
     output reg  [1:0]                        s_axi_bresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi BVALID" *)
     output reg                               s_axi_bvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi BREADY" *)
     input  wire                              s_axi_bready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi ARADDR" *)
     input  wire [C_S_AXI_ADDR_WIDTH-1:0]     s_axi_araddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi ARPROT" *)
     input  wire [2:0]                        s_axi_arprot,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi ARVALID" *)
     input  wire                              s_axi_arvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi ARREADY" *)
     output reg                               s_axi_arready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi RDATA" *)
     output reg  [C_S_AXI_DATA_WIDTH-1:0]     s_axi_rdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi RRESP" *)
     output reg  [1:0]                        s_axi_rresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi RVALID" *)
     output reg                               s_axi_rvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axi RREADY" *)
     input  wire                              s_axi_rready
 );
 
@@ -270,6 +304,7 @@ module pps_counter #(
     assign tdd_txnrx  = (tdd_en && tdd_drive) ? (in_tx_r ^ tdd_txpol) : 1'b0;
     assign tdd_enable = (tdd_en && tdd_drive) ?
                         ((in_tx_r | in_rx_r) ^ tdd_enpol) : 1'b0;
+    assign tdd_armed  = tdd_en && tdd_drive;
 
     // FRAME_POS CDC: Gray-code (changes every cnt_clk), like live_count
     reg [31:0] fgray;
