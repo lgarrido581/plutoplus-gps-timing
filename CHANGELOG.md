@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — pps_counter: `tdd_armed`, explicit AXI interface
+
+- New `tdd_armed` output: high while the PPS window drives `tdd_enable`
+  (`TDD_CTRL` enable and drive_pins). For designs that share the capture-start
+  input with another source; Pluto+ and LibreSDR leave it unconnected.
+- Explicit `X_INTERFACE_INFO` / `X_INTERFACE_PARAMETER` attributes on the AXI4-Lite
+  ports. In ADI's 2023_R2 ZynqMP projects (Vivado 2023.2) module-reference inference
+  took the parameter-sized ports for an interface array and built no `s_axi`
+  interface, so `ad_cpu_interconnect` failed. The attributes name the interface that
+  inference produces where it works: in a plain block design both versions come up
+  with the same `s_axi` (AXI4-Lite, 7-bit address, same clock/reset). Metadata only.
+- Synthesis: 515 → 516 LUTs on xc7z010 and xc7z020 (the `tdd_armed` AND).
+
 ## v2.0.4 — signed latch delta (anchor-label slip fix)
 
 - **Fixed the intermittent late-capture anchor label** (+0.4967 s at a 10 MHz cnt_clk,
