@@ -19,6 +19,7 @@
 #include <zmq.h>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,6 +27,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <string>
 
@@ -148,9 +150,46 @@ static void cap_lock_acquire(void) {
 }
 static void cap_lock_release(void) { unlink(CAP_LOCK_PATH); }
 
+// Zero-copy IQ frame. zmq calls this (on its I/O thread) once it no longer needs the
+// bytes -- after they are written to the socket, or dropped with a vanished peer.
+static void iq_sent(void *data, void *hint) {
+    (void)data;
+    char c = 1;
+    ssize_t w = write((int)(intptr_t)hint, &c, 1);
+    (void)w;
+}
+static const int IQ_SEND_TIMEOUT_MS = 30000;    // 118 MB goes out in ~2.5 s on GbE
+
+// Wait up to wait_ms for zmq to let go of a reply's IQ, then free its DMA buffer.
+static bool finish_send(capture_result_t *res, int pfd[2], int wait_ms) {
+    struct pollfd p;
+    p.fd = pfd[0]; p.events = POLLIN; p.revents = 0;
+    if (poll(&p, 1, wait_ms) != 1) return false;
+    char c;
+    ssize_t r = read(pfd[0], &c, 1);
+    (void)r;
+    capture_release(res);
+    close(pfd[0]);
+    close(pfd[1]);
+    return true;
+}
+
+// A reply zmq had not finished sending (stalled peer). Its buffer stays allocated, and
+// the next capture would fail to create one, until zmq lets go of it.
+static capture_result_t g_unsent;
+static int g_unsent_fd[2] = {-1, -1};
+
 static void handle_capture(void *sock, const std::string &body) {
     capture_req_t req;
     memset(&req, 0, sizeof req);
+
+    if (g_unsent_fd[0] >= 0) {
+        if (!finish_send(&g_unsent, g_unsent_fd, 5000)) {
+            send_error(sock, "previous capture's IQ is still being sent");
+            return;
+        }
+        g_unsent_fd[0] = g_unsent_fd[1] = -1;
+    }
 
     double v;
     if (!jnum(body, "freq_hz", &v))        { send_error(sock, "missing freq_hz"); return; }
@@ -183,11 +222,27 @@ static void handle_capture(void *sock, const std::string &body) {
         return;
     }
 
-    // success: exactly two frames [meta, iq]
+    // success: exactly two frames [meta, iq]. The IQ goes out zero-copy from the DMA
+    // buffer; release the buffer only after zmq is done with it.
     zmq_send(sock, res.meta_json, strlen(res.meta_json), ZMQ_SNDMORE);
-    zmq_send(sock, res.iq, res.iq_len, 0);
-    free(res.meta_json);
-    free(res.iq);
+    int pfd[2];
+    if (pipe(pfd) != 0) {                       // no pipe: fall back to a copying send
+        zmq_send(sock, res.iq, res.iq_len, 0);
+        capture_release(&res);
+        return;
+    }
+    zmq_msg_t m;
+    zmq_msg_init_data(&m, res.iq, res.iq_len, iq_sent, (void *)(intptr_t)pfd[1]);
+    if (zmq_msg_send(&m, sock, 0) < 0) zmq_msg_close(&m);   // close runs iq_sent
+    if (!finish_send(&res, pfd, IQ_SEND_TIMEOUT_MS)) {
+        // zmq still holds the bytes: never free memory it may still read. Park the
+        // buffer; the next capture request finishes the release.
+        fprintf(stderr, "pluto_ctld: IQ send not finished after %d s; buffer kept\n",
+                IQ_SEND_TIMEOUT_MS / 1000);
+        g_unsent = res;
+        g_unsent_fd[0] = pfd[0];
+        g_unsent_fd[1] = pfd[1];
+    }
 }
 
 // ---- main ------------------------------------------------------------------

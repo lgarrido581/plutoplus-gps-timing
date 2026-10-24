@@ -23,11 +23,15 @@
 #define PLUTO_LCLK_MAX_HZ 61440000.0
 #define LIBRE_LCLK_MAX_HZ 122880000.0
 #define TDD_V2_PATH "/sys/bus/platform/devices/7c440000.tdd"
-#define ARM_LEAD_S  0.35         /* arm the RX DMA this long before t0 so it catches the
-                                  * t0 PPS edge. The capture therefore gates on the first
-                                  * PPS at/after (t0 - ARM_LEAD_S); used by BOTH the t0
-                                  * wait and the Level-1 integer-second anchor -- keep in
-                                  * sync (a single constant so they cannot drift). */
+#define WINDOW_MARGIN_S 0.010    /* the PPS window stays open this long (+4096 samples)
+                                  * past the end of the capture */
+#define MAX_BLOCK_PATH "/sys/module/industrialio_buffer_dma/parameters/max_block_size"
+#define ARM_LEAD_S  0.35         /* release the PPS window into the RX DMA no earlier than
+                                  * this before t0 (later for a long window, once the
+                                  * previous second's window has closed), so the capture
+                                  * gates on the first PPS at/after (t0 - ARM_LEAD_S); used
+                                  * by BOTH the release and the Level-1 integer-second
+                                  * anchor -- a single constant so they cannot drift. */
 
 static struct iio_device *g_tdd = NULL;
 static int g_tdd_v2 = 0;
@@ -48,20 +52,35 @@ static int sysfs_write(const char *name, long long value) {
  * `if (tdd_sync && tdd_sync_rst) tdd_counter<=0` -- but it zeroes the counter mid-frame, so a PPS
  * off a frame boundary makes a runt frame -> truncated capture. So we anchor via pps_counter's
  * window, which owns the boundary.) The BD ORs axi_tdd/tdd_channel_1 with pps_counter/tdd_enable into
- * the RX-DMA sync (LEVEL: DMA transfers while HIGH); pps_counter resets its frame to 0 on
- * EVERY PPS edge. So for a gated capture we DISABLE axi_tdd -- which forces tdd_channel_1
- * LOW (validated: disabling the core latches ch1 low) -- and let pps_counter own the OR
+ * the RX-DMA sync (each DMA segment starts on a sample with the sync HIGH); pps_counter
+ * resets its frame to 0 on EVERY PPS edge. So for a gated capture we DISABLE axi_tdd --
+ * which holds tdd_channel_1 at its latched polarity, made LOW first (configure_tdd: the
+ * boot default is HIGH) -- and let pps_counter own the OR
  * via its PPS-anchored window (programmed by the caller with pps_ts_config_frame). The
  * window then opens coincident across nodes. restore_rx_mode() re-opens axi_tdd for
  * free-running streaming RX. TDD raw counts are in sample-clock (fs) units. */
 static int configure_tdd(struct iio_context *ctx) {
     g_tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
     g_tdd_v2 = 0;
+    /* A disabled axi_tdd drives each channel at its LATCHED polarity, which stays the
+     * synthesis default until the core has run: ch1 (the RX-DMA sync) defaults HIGH on
+     * Pluto (TDD_DEFAULT_POL 0b010), so after boot the OR would hold the gate open and
+     * the first gated capture would start as soon as its buffer is queued. Run the core
+     * once with ch1 off at polarity 0, so disabling it latches ch1 LOW. */
     if (!g_tdd && access(TDD_V2_PATH "/enable", F_OK) == 0) {
         g_tdd_v2 = 1;
+        sysfs_write("out_channel1_polarity", 0);
+        sysfs_write("out_channel1_enable", 0);
+        sysfs_write("enable", 1);
         return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
     if (!g_tdd) return -1;
+    struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
+    if (ch1) {
+        iio_channel_attr_write(ch1, "polarity", "0");
+        iio_channel_attr_write(ch1, "enable", "0");
+        iio_device_attr_write(g_tdd, "enable", "1");
+    }
     /* iio_device_attr_write returns the BYTE COUNT on success (not 0); the caller
      * checks != 0, so returning it raw read every success as failure. Normalize. */
     return iio_device_attr_write(g_tdd, "enable", "0") < 0 ? -1 : 0;
@@ -117,8 +136,47 @@ static int fail(capture_result_t *out, const char *msg) {
     return -1;
 }
 
+/* The DMA buffer and context behind a successful capture (see capture_release). */
+struct capture_handle {
+    struct iio_buffer  *buf;
+    struct iio_context *ctx;
+};
+
+void capture_release(capture_result_t *out) {
+    struct capture_handle *h = (struct capture_handle *)out->priv;
+    if (h) {
+        if (h->buf) iio_buffer_destroy(h->buf);
+        if (h->ctx) iio_context_destroy(h->ctx);
+        free(h);
+    }
+    free(out->meta_json);
+    out->priv = NULL; out->meta_json = NULL; out->iq = NULL; out->iq_len = 0;
+}
+
+static double realtime_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static double mono_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+}
+
+/* The kernel's per-DMA-block cap (bytes), or 0 if unreadable. A gap-free capture
+ * is one block; S66ctld raises the 64 MiB default so ~1 s at 30.72 MS/s fits. */
+static long long max_block_bytes(void) {
+    long long v = 0;
+    FILE *f = fopen(MAX_BLOCK_PATH, "r");
+    if (f) { if (fscanf(f, "%lld", &v) != 1) v = 0; fclose(f); }
+    return v;
+}
+
 int capture_run(const capture_req_t *req, capture_result_t *out) {
-    out->meta_json = NULL; out->iq = NULL; out->iq_len = 0; out->err[0] = '\0';
+    out->meta_json = NULL; out->iq = NULL; out->iq_len = 0; out->priv = NULL;
+    out->err[0] = '\0';
 
     if (req->rate_hz <= 0 || req->samples == 0 || req->freq_hz <= 0)
         return fail(out, "bad request (freq_hz/sample_rate_hz/samples)");
@@ -211,6 +269,8 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     const char *method = "live_count_at_refill";
     long long frame_len = 0;
     long long off_raw = 0;
+    double window_end_s = 0.0;   /* RX window close, seconds after its frame start */
+    double edge_s = 0.0;         /* t0 path: the PPS second sample 0 is gated to */
     int armed = 0;
     uint32_t lseq_prev = 0;
 
@@ -224,20 +284,54 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             return fail(out, "tdd_sync needs a live GPS PPS (would wedge the DMA)");
         }
         frame_len = lclk_multiple * req->rate_hz;  /* one GPS second in l_clk counts */
-        /* pps_counter window [on_raw, off_raw): on_raw = offset_samples; off must cover the
-         * offset + whole capture + arm-latency margin and stay inside the frame. */
+        /* pps_counter window [on_raw, off_raw): on_raw = offset_samples; off covers the
+         * offset + the whole capture + a small margin, and must close >= 20 ms before
+         * the next PPS (so that frame's window opens on a fresh edge). The DMA starts
+         * each <=16 MB segment on a sample with its sync high, so the window must stay
+         * open until the last segment has started; the margin covers that: 10 ms + 4096
+         * samples. One capture therefore fits in just under a second (~0.97 s at offset
+         * 0); it was 1.5x the capture (max ~0.65 s) before. */
+        long long margin = (long long)((double)req->rate_hz * WINDOW_MARGIN_S) + 4096;
         long long on_raw = req->offset_samples * lclk_multiple;
-        off_raw = (req->offset_samples + (long long)req->samples +
-                   (long long)(req->samples / 2)) * lclk_multiple;
+        off_raw = (req->offset_samples + (long long)req->samples + margin) * lclk_multiple;
         long long setup_guard_raw = (long long)(nominal_cnt * 0.020);
         if (req->offset_samples < 0 ||
             off_raw >= frame_len - setup_guard_raw) {
-            char m[160];
-            snprintf(m, sizeof m, "offset(%lld)+capture(%zu)+margin leaves <20ms before PPS",
-                     req->offset_samples, req->samples);
+            long long max_n = (frame_len - setup_guard_raw) / lclk_multiple - 1
+                              - req->offset_samples - margin;
+            char m[200];
+            snprintf(m, sizeof m, "offset(%lld)+capture(%zu) does not fit the PPS second: "
+                     "max %lld samples at this rate and offset", req->offset_samples,
+                     req->samples, max_n > 0 ? max_n : 0);
             pps_ts_close(&pps);
             iio_context_destroy(ctx);
             return fail(out, m);
+        }
+        window_end_s = (double)off_raw / nominal_cnt;
+        if (req->have_t0) {
+            double now_s = realtime_s();
+            double wait = req->t0_gps - now_s - ARM_LEAD_S;
+            if (wait <= 0.0 || wait >= 60.0) {
+                pps_ts_close(&pps);
+                iio_context_destroy(ctx);
+                return fail(out, "t0_gps must be 0.35 to 60 seconds in the future");
+            }
+            /* The gated PPS second: the first PPS at/after t0 - ARM_LEAD_S (the same
+             * rule the Level-1 anchor below uses). */
+            edge_s = (double)(long long)(req->t0_gps - ARM_LEAD_S);
+            if (edge_s < req->t0_gps - ARM_LEAD_S) edge_s += 1.0;
+            /* The window is released in the second before the edge, once that second's
+             * window has closed. A frame configured inside that second starts now (the
+             * edge's PPS re-anchors it), so its window must close well before the edge. */
+            if (edge_s - now_s < window_end_s + 0.020) {
+                char m[200];
+                snprintf(m, sizeof m, "t0_gps is %.2f s ahead; a %.2f s capture window needs "
+                         "more than %.2f s", edge_s - now_s, window_end_s,
+                         window_end_s + 0.020);
+                pps_ts_close(&pps);
+                iio_context_destroy(ctx);
+                return fail(out, m);
+            }
         }
         if (configure_tdd(ctx) != 0) {
             pps_ts_close(&pps);
@@ -246,8 +340,9 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         }
         /* Program pps_counter's PPS-anchored RX window [offset, off_raw). cnt_clk == the
          * AD936x sample clock (== l_clk), so these counts are the same sample units as the
-         * axi_tdd path. drive_pins makes tdd_enable output the window; the BD ORs it into
-         * the RX-DMA sync -> sample[0] lands on a GPS-locked edge, coincident across nodes. */
+         * axi_tdd path. The BD ORs tdd_enable into the RX-DMA sync; its output is held low
+         * until the buffer exists (pps_ts_drive_in_gap below), then sample[0] lands on a
+         * GPS-locked edge, coincident across nodes. */
         if (pps_ts_config_frame((uint32_t)frame_len, (uint32_t)on_raw,
                                 (uint32_t)off_raw) != 0) {
             restore_rx_mode(frame_len, req->rate_hz);
@@ -256,40 +351,6 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             return fail(out, "pps_counter frame config failed (/dev/mem)");
         }
         iio_context_set_timeout(ctx, 4000);   /* a missed window errors, not hangs */
-
-        /* With an agreed future edge, wait before arming. Arming earlier allows
-         * buffer creation to consume an intervening PPS instead of t0_gps. */
-        if (req->have_t0) {
-            struct timespec now;
-            clock_gettime(CLOCK_REALTIME, &now);
-            double now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
-            double wait = req->t0_gps - now_s - ARM_LEAD_S;
-            if (wait <= 0.0 || wait >= 60.0) {
-                restore_rx_mode(frame_len, req->rate_hz);
-                pps_ts_close(&pps);
-                iio_context_destroy(ctx);
-                return fail(out, "t0_gps must be 0.35 to 60 seconds in the future");
-            }
-            struct timespec ts;
-            ts.tv_sec = (time_t)wait;
-            ts.tv_nsec = (long)((wait - (double)ts.tv_sec) * 1e9);
-            nanosleep(&ts, NULL);
-        } else {
-            /* Observe one PPS after configuring so the finite window definitely
-             * replaces the normal full-open state. Then let that window close
-             * and arm for the following PPS. */
-            if (!pps_ts_live(&pps, 1.5)) {
-                restore_rx_mode(frame_len, req->rate_hz);
-                pps_ts_close(&pps);
-                iio_context_destroy(ctx);
-                return fail(out, "PPS stopped while preparing TDD capture");
-            }
-            double settle_s = (double)off_raw / nominal_cnt + 0.010;
-            struct timespec ts;
-            ts.tv_sec = (time_t)settle_s;
-            ts.tv_nsec = (long)((settle_s - (double)ts.tv_sec) * 1e9);
-            nanosleep(&ts, NULL);
-        }
 
         /* Snapshot before the first arm. The old ordering armed here, then took
          * the snapshot after buffer creation; by then the capture latch had
@@ -304,16 +365,26 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         armed = 1;
     }
 
-    /* One iio_buffer_refill == ONE DMA block, gap-free internally, bounded by CMA /
-     * the 64 MiB DMA-block limit (~16 M samples ~= 0.5 s @ 30.72 MSPS). */
+    /* One iio_buffer_refill == ONE DMA block, gap-free internally, bounded by CMA and
+     * the kernel's max_block_size (S66ctld raises it to 128 MiB = 1 s at 30.72 MS/s). */
     int rc = 0;
+    long long block_cap = max_block_bytes();
+    double t_alloc0 = mono_ms();
+    /* ONE kernel block. libiio's default asks for four and the mmap path allocates as
+     * many full-size blocks as CMA holds (2 x 118 MB for a 0.96 s capture), doubling the
+     * memory and the allocation time for blocks that are never read. */
+    iio_device_set_kernel_buffers_count(rx, 1);
     struct iio_buffer *buf = iio_device_create_buffer(rx, req->samples, false);
     if (!buf) {
         if (armed) { iio_device_attr_write(rx, "sync_start_enable", "disarm");
                      restore_rx_mode(frame_len, req->rate_hz); }
         pps_ts_close(&pps);
         iio_context_destroy(ctx);
-        return fail(out, "create_buffer failed (CMA / 64 MiB limit -- fewer samples)");
+        char m[200];
+        snprintf(m, sizeof m, "create_buffer failed for %zu samples (%zu MB; DMA block cap "
+                 "%lld MB, CMA) -- fewer samples or raise iio_max_block_size",
+                 req->samples, req->samples * 4 / 1000000, block_cap / 1000000);
+        return fail(out, m);
     }
 
     /* LibreSDR's RX DMA consumes the pre-buffer arm while the buffer is being
@@ -326,6 +397,53 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         pps_ts_close(&pps);
         iio_context_destroy(ctx);
         return fail(out, "sync_start_enable re-arm failed");
+    }
+    double alloc_ms = mono_ms() - t_alloc0;
+
+    /* Release the PPS window into the DMA sync only now that the buffer is queued, and
+     * only while the window is closed (pps_ts_drive_in_gap): the DMA then starts on the
+     * next window's rising edge -- the gated PPS -- which is also the edge the latch
+     * reports. The old order (window live from configure, buffer created 0.35 s before
+     * t0) let a still-open window start the DMA at once, under the next edge's label. */
+    uint32_t arm_pos = 0;
+    if (armed) {
+        double deadline = 0.0;
+        if (req->have_t0) {
+            double target = edge_s - 1.0 + window_end_s + 0.002;
+            if (target < edge_s - ARM_LEAD_S) target = edge_s - ARM_LEAD_S;
+            double wait = target - realtime_s();
+            if (wait > 0.0) {
+                struct timespec ts;
+                ts.tv_sec = (time_t)wait;
+                ts.tv_nsec = (long)((wait - (double)ts.tv_sec) * 1e9);
+                nanosleep(&ts, NULL);
+            }
+            deadline = edge_s - 0.002;
+        } else if (pps_ts_live(&pps, 1.5)) {
+            deadline = realtime_s() + 1.0;   /* the gap before the next PPS */
+        }
+        int d = deadline > 0.0
+              ? pps_ts_drive_in_gap((uint32_t)frame_len, (uint32_t)off_raw,
+                                    (uint32_t)(nominal_cnt * 0.001), deadline, &arm_pos)
+              : -4;
+        if (d != 0) {
+            iio_device_attr_write(rx, "sync_start_enable", "disarm");
+            iio_buffer_destroy(buf);
+            restore_rx_mode(frame_len, req->rate_hz);
+            pps_ts_close(&pps);
+            iio_context_destroy(ctx);
+            char m[200];
+            if (d == -4)
+                snprintf(m, sizeof m, "PPS stopped while preparing TDD capture");
+            else if (d == -1)
+                snprintf(m, sizeof m, "window still open at the arm deadline (buffer "
+                         "allocation took %.0f ms) -- send t0_gps further ahead", alloc_ms);
+            else if (d == -2)
+                snprintf(m, sizeof m, "arm raced the PPS edge");
+            else
+                snprintf(m, sizeof m, "pps_counter not mappable (/dev/mem)");
+            return fail(out, m);
+        }
     }
 
     /* Anchor read just before refill (== sample[0] for the free-running path). */
@@ -365,12 +483,27 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     uint32_t dbg_lseq_prev = lseq_prev;
     int32_t  dbg_latch_off = 0;
     uint64_t dbg_lgps = 0;
+    /* Self-check of the gated start, in raw counter ticks (no PPS needed): when the
+     * block finished minus its duration is when the DMA really started, and it must not
+     * precede the latched edge. A DMA that started inside an already-open window has no
+     * edge of its own -- the latch then reports a LATER window and the check goes
+     * negative, or nothing is latched at all. Either way the label is wrong: flagged
+     * degraded below. LATCH_SEQ reads the ID 0x50505343 on images without the latch. */
+    double start_check_ms = 0.0;
+    int no_start_edge = 0;
     if (armed && have_pps) {
         uint32_t lc = 0, lseq = 0; uint64_t lgps = 0;
         pps_ts_latch(&pps, &lc, &lseq, &lgps);
         dbg_lc = lc; dbg_lseq = lseq; dbg_lgps = lgps;
+        pps_anchor_t now_a; pps_ts_anchor(&pps, &now_a);
+        double cnt_chk = (double)now_a.cnt_hz;
+        if (cnt_chk < nominal_cnt * 0.5 || cnt_chk > nominal_cnt * 1.5) cnt_chk = nominal_cnt;
+        if (lseq != lseq_prev)
+            start_check_ms = ((double)(uint32_t)(now_a.live_count - lc) / cnt_chk
+                              - (double)nsamp / fs) * 1e3;
+        else if (lseq != 0x50505343u)
+            no_start_edge = 1;
         if (lseq != lseq_prev && lgps != 0) {              /* latch fired for this capture */
-            pps_anchor_t now_a; pps_ts_anchor(&pps, &now_a);
             dbg_ppsc = now_a.pps_count;
             dbg_latch_off = (int32_t)(lc - now_a.pps_count);
             anchor = now_a;
@@ -378,7 +511,6 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             anchor.live_count = lc;
             method = "tdd_pps_latch";
         } else {                                           /* snap to the frame grid */
-            pps_anchor_t now_a; pps_ts_anchor(&pps, &now_a);
             dbg_ppsc = now_a.pps_count;
             dbg_latch_off = (int32_t)(lc - now_a.pps_count);
             double cnt = (double)now_a.cnt_hz;
@@ -436,7 +568,11 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             fprintf(stderr, "pluto_ctld: coarse-second skew %+d s (OS %lld vs gated t0 %lld) -- "
                     "anchored to schedule, flagged degraded\n", coarse_skew_s, os_sec, t0_sec);
     }
-    int degraded = (!anchor.present) || (coarse_skew_s != 0);
+    int early_start = armed && (start_check_ms < -1.0 || no_start_edge);
+    int degraded = (!anchor.present) || (coarse_skew_s != 0) || early_start;
+    if (early_start)
+        fprintf(stderr, "pluto_ctld: DMA started before the labeled edge (%s) -- "
+                "flagged degraded\n", no_start_edge ? "no edge latched" : "block ended early");
 
     /* --- build the SigMF metadata (in memory). core:frequency = read-back LO. */
     char dt[64]; iso8601_ns(anchor.gps_ns, dt, sizeof dt);
@@ -449,7 +585,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
                  "    \"gpsanchor:antenna_position\": [%.8f, %.8f, %.3f],\n",
                  req->lat, req->lon, req->alt);
 
-    size_t metacap = 3072;
+    size_t metacap = 3584;
     char *meta = (char *)malloc(metacap);
     if (!meta) { rc = fail(out, "oom (meta)"); goto cleanup; }
     snprintf(meta, metacap,
@@ -487,7 +623,12 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"gpsanchor:latch_seq_prev\": %u,\n"
       "      \"gpsanchor:latch_gps_ns\": %llu,\n"
       "      \"gpsanchor:pps_count_at_read\": %u,\n"
-      "      \"gpsanchor:latch_off_signed\": %ld\n"
+      "      \"gpsanchor:latch_off_signed\": %ld,\n"
+      "      \"ctl:alloc_ms\": %.1f,\n"
+      "      \"ctl:max_block_size\": %lld,\n"
+      "      \"ctl:arm_frame_pos\": %u,\n"
+      "      \"ctl:start_check_ms\": %.3f,\n"
+      "      \"ctl:start_edge_latched\": %s\n"
       "    }\n"
       "  ],\n"
       "  \"annotations\": []\n"
@@ -498,16 +639,19 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       method, anchor.live_count, anchor.pps_count, anchor.pps_seq,
       second_src, coarse_skew_s,
       dbg_lc, dbg_lseq, dbg_lseq_prev, (unsigned long long)dbg_lgps,
-      dbg_ppsc, (long)dbg_latch_off);
+      dbg_ppsc, (long)dbg_latch_off, alloc_ms, block_cap, arm_pos, start_check_ms,
+      no_start_edge ? "false" : "true");
 
-    /* copy the IQ out of the iio buffer (freed below). */
-    uint8_t *iqcopy = (uint8_t *)malloc(bytes ? bytes : 1);
-    if (!iqcopy) { free(meta); rc = fail(out, "oom (iq)"); goto cleanup; }
-    memcpy(iqcopy, start, bytes);
-
+    /* Zero-copy: hand out the IQ where the DMA put it. The block stays ours until
+     * capture_release() destroys the buffer (it is the only block, so restoring
+     * free-running RX below leaves the DMA nothing to fill). */
+    struct capture_handle *h = (struct capture_handle *)malloc(sizeof *h);
+    if (!h) { free(meta); rc = fail(out, "oom (handle)"); goto cleanup; }
+    h->buf = buf; h->ctx = ctx;
     out->meta_json = meta;
-    out->iq = iqcopy;
+    out->iq = (uint8_t *)start;
     out->iq_len = bytes;
+    out->priv = h;
     rc = 0;
 
 cleanup:
@@ -515,8 +659,10 @@ cleanup:
         iio_device_attr_write(rx, "sync_start_enable", "disarm");
         restore_rx_mode(frame_len, req->rate_hz);  /* full-open window -> normal RX, no reboot */
     }
-    iio_buffer_destroy(buf);
     if (have_pps) pps_ts_close(&pps);
-    iio_context_destroy(ctx);
+    if (rc != 0) {
+        iio_buffer_destroy(buf);
+        iio_context_destroy(ctx);
+    }
     return rc;
 }
