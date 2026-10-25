@@ -33,6 +33,8 @@
   env sets `iio_max_block_size`.
 - New metadata: `ctl:alloc_ms`, `ctl:max_block_size`, `ctl:arm_frame_pos`,
   `ctl:start_check_ms`, `ctl:start_edge_latched`.
+- `ping` advertises `caps` (`held_arm`, `zero_copy`, `start_check`) and `max_block_size`,
+  so a client can size and schedule captures for the build it is talking to.
 - Hardware-tested on a Pluto+ without a PPS (free-running frame; ungated captures to
   0.96 s / 118 MB). Not yet run against a live PPS.
 

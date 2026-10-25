@@ -7,7 +7,7 @@
 // is capture_core.c (a refactor of the validated DSN/sdr-stack iq_capture.c).
 //
 // Two ops on one REP socket (strict REQ/REP lockstep -- EXACTLY one reply each):
-//   ping     -> 1 frame  {"pong":true,"api":"dsn.pluto_zmq.ctl/1",...}
+//   ping     -> 1 frame  {"pong":true,"api":"dsn.pluto_zmq.ctl/1",...,"caps":[...]}
 //   capture  -> 2 frames [meta-json, iq-bytes] on success; 1 frame {"error":...} on failure
 // The client decides success purely by frame count, so on ANY failure send exactly
 // one frame, and on success exactly two.
@@ -121,11 +121,20 @@ static void send_error(void *sock, const std::string &msg) {
     send_one(sock, r);
 }
 
+// caps: what this build's capture op can do, so a client can size and schedule captures
+// (absent on older builds: ~0.65 s windows of 1.5x the capture, armed 0.35 s before t0).
+//   held_arm     the PPS window is released only once the buffer is queued: a capture
+//                fits in offset + samples + 10 ms + 4096 samples <= 1 s - 20 ms, and
+//                t0_gps must lead by more than that window + 20 ms
+//   zero_copy    the IQ frame is sent straight from the DMA buffer
+//   start_check  ctl:start_check_ms / ctl:start_edge_latched in the meta
+// max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
-    char b[192];
+    char b[320];
     snprintf(b, sizeof b,
-             "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f}",
-             API, now_unix());
+             "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
+             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\"],\"max_block_size\":%lld}",
+             API, now_unix(), capture_block_cap());
     send_one(sock, b);
 }
 

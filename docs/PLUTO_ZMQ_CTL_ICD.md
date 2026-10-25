@@ -52,10 +52,21 @@ daemon (5560/5561). DSN's GPS/PPS/LO trust gate reads telemetry independently.
 
 Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
 ```json
-{ "pong": true, "api": "dsn.pluto_zmq.ctl/1", "schema": "dsn.health/1", "t_unix": 1782523200.123 }
+{ "pong": true, "api": "dsn.pluto_zmq.ctl/1", "schema": "dsn.health/1", "t_unix": 1782523200.123,
+  "caps": ["held_arm", "zero_copy", "start_check"], "max_block_size": 134217728 }
 ```
 - `pong` = boolean `true`. `api` starts with `"dsn.pluto_zmq"` (exactly
   `"dsn.pluto_zmq.ctl/1"`). This is how DSN auto-discovery confirms the control port.
+- `caps` (absent on older builds) says what `capture` can do, so a client can size and
+  schedule captures without trial and error:
+  - `held_arm` — the window is released only once the buffer is queued (§7, arming): a
+    capture fits in `offset + samples + 10 ms + 4096 samples ≤ 1 s − 20 ms`, and
+    `t0_gps` must lead by more than that window + 20 ms. Without it: the window is 1.5×
+    the capture, armed 0.35 s before `t0_gps`.
+  - `zero_copy` — the IQ frame is sent straight from the DMA buffer.
+  - `start_check` — `ctl:start_check_ms` / `ctl:start_edge_latched` are in the meta.
+- `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
+  `samples × 4` must fit in it.
 
 ## 4. `capture` — request
 

@@ -52,6 +52,9 @@ int capture_run(const capture_req_t *req, capture_result_t *out);
 /* Free what a successful capture_run() returned (DMA buffer, context, meta). */
 void capture_release(capture_result_t *out);
 
+/* The kernel's DMA block cap in bytes (one capture must fit in one block), 0 if unknown. */
+long long capture_block_cap(void);
+
 #ifdef __cplusplus
 }
 #endif
