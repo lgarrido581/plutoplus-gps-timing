@@ -59,11 +59,8 @@ calc_dxo() {
     echo $(($1 * $2 / 1000))
 }
 median() {  # median of the integer arguments (the two middle ones averaged when even)
-    n=$#
-    set -- $(printf '%s\n' "$@" | sort -n)
-    lo=$(( (n + 1) / 2 )); hi=$(( n / 2 + 1 ))
-    eval "a=\${$lo}; b=\${$hi}"
-    echo $(( (a + b) / 2 ))
+    printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 }
+        END { lo = int((NR + 1) / 2); hi = int(NR / 2) + 1; printf "%d\n", int((v[lo] + v[hi]) / 2) }'
 }
 
 # Hardware-free regression check for the rate-scaled gain and integer actuator
