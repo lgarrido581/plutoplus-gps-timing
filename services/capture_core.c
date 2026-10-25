@@ -59,6 +59,30 @@ static int sysfs_write(const char *name, long long value) {
  * via its PPS-anchored window (programmed by the caller with pps_ts_config_frame). The
  * window then opens coincident across nodes. restore_rx_mode() re-opens axi_tdd for
  * free-running streaming RX. TDD raw counts are in sample-clock (fs) units. */
+/* A synced axi_tdd (sync_soft or a sync source) is RUNNING (state 3) with burst_count 0 and
+ * can't be disabled: enable 0 reads back 0, but the core keeps running and its channels keep
+ * their window, taking channel changes only at a frame end -- so channel 1 can't be held LOW
+ * and a gated capture would start as soon as its buffer is queued. Park it: with the core
+ * enabled a one-frame burst ends the run at the next frame end, then enable 0 leaves it IDLE.
+ * Verified on node1 (2026-10-25). Returns 0 when not running or parked, -1 if it still runs. */
+static int tdd_park(double timeout_s) {
+    long long st = -1;
+    if (iio_device_attr_read_longlong(g_tdd, "state", &st) < 0 || st != 3) return 0;
+    iio_device_attr_write(g_tdd, "enable", "1");
+    iio_device_attr_write(g_tdd, "burst_count", "1");
+    iio_device_attr_write(g_tdd, "enable", "0");
+    struct timespec t0, now, pause = { 0, 20000000L };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do {
+        nanosleep(&pause, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (iio_device_attr_read_longlong(g_tdd, "state", &st) < 0) break;
+    } while (st == 3 && (double)(now.tv_sec - t0.tv_sec) +
+                        (double)(now.tv_nsec - t0.tv_nsec) / 1e9 < timeout_s);
+    iio_device_attr_write(g_tdd, "burst_count", "0");
+    return st == 3 ? -1 : 0;
+}
+
 static int configure_tdd(struct iio_context *ctx) {
     g_tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
     g_tdd_v2 = 0;
@@ -75,6 +99,7 @@ static int configure_tdd(struct iio_context *ctx) {
         return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
     if (!g_tdd) return -1;
+    if (tdd_park(2.5) != 0) return -2;
     struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
     if (ch1) {
         iio_channel_attr_write(ch1, "polarity", "0");
@@ -335,10 +360,12 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
                 return fail(out, m);
             }
         }
-        if (configure_tdd(ctx) != 0) {
+        int tdd = configure_tdd(ctx);
+        if (tdd != 0) {
             pps_ts_close(&pps);
             iio_context_destroy(ctx);
-            return fail(out, "axi_tdd (iio-axi-tdd-0) not found");
+            return fail(out, tdd == -2 ? "axi_tdd is running (synced) and could not be parked"
+                                       : "axi_tdd (iio-axi-tdd-0) not found");
         }
         /* Program pps_counter's PPS-anchored RX window [offset, off_raw). cnt_clk == the
          * AD936x sample clock (== l_clk), so these counts are the same sample units as the
