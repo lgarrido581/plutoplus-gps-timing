@@ -17,6 +17,13 @@
  * overflow). While streaming it holds /tmp/pluto_ctld.capturing, so xo_correct.sh does
  * not step the clocks under the DMA.
  *
+ * Measured on node1's Pluto+ to its Jetson over GbE (2026-10-25), one channel, 8 x 100 ms
+ * blocks: 2.5 / 5 / 7.5 / 10 / 12.5 MS/s stream with no loss (10-50 MB/s, Pluto CPU
+ * ~20-70%); 15 MS/s (60 MB/s) overflows -- the send side tops out near 57 MB/s. Starts
+ * land on the PPS edge back to back; PPS markers are exact on a clean clock (0.07 ppm).
+ * TODO: on a DMA overflow the delivered count no longer matches time -- restart and
+ * re-anchor instead of carrying on.
+ *
  * Usage: iq_stream --connect tcp://HOST:5563 [--rate HZ] [--freq HZ] [--gain DB]
  *                  [--block-ms MS] [--blocks N] [--seconds S]
  * The receiver binds a PULL socket first. One radio owner: stop DSN (pluto_ctld idle).
