@@ -88,8 +88,12 @@ A single JSON object. Optional fields are omitted when unset — do not assume p
 
 \* When `tdd_sync` is true, `t0_gps` is supplied and the server releases the PPS window
 into the DMA in the second before it (§7, arming) — so every node given the same `t0_gps`
-grabs the **same** PPS edge. `t0_gps` must be at least 0.35 s ahead, and more than the
-capture window + 20 ms ahead: ≈ 1 s for a 0.97 s capture.
+grabs the **same** PPS edge. The server first waits for a fresh PPS (up to 1 s) to prove
+the GPS is live, then needs `t0_gps` at least 0.35 s, and more than the capture window +
+20 ms, after that PPS. In practice: **send `t0_gps` more than ~1.05 s ahead**, at any
+capture length up to ~0.95 s. Measured on a Pluto+ with a live PPS, 2026-10-25: a request
+0.95 s ahead is refused ("t0_gps must be 0.35 to 60 seconds in the future"), 1.05 s works,
+for 0.04 s and 0.9 s captures alike.
 
 ## 5. `capture` — success reply (two frames)
 
