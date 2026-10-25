@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased — pluto_ctld: ~1 s gated captures, correct arming, zero-copy
+## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
+
+Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
+`4c80a8c4…d87d0f`, unchanged since v2.0.4). The `pps_counter` HDL change below
+(`tdd_armed`, AXI interface attributes) adds an output that Pluto+ leaves unconnected, so
+this release does not re-synthesize. Pluto+ only: LibreSDR stays on v2.0.4 until it can be
+smoke-tested on that board.
+
+### xo_correct: steer on the median PPS delta, not the mean
+
+- The Pluto+ sample clock occasionally gains tens to hundreds of counts in one second,
+  inside `MAXPPM`. The 8-delta mean then stepped `xo_correction` by up to ~24 ppm the
+  wrong way, and stepped back ~9 s later. Meanwhile the clock really was off, and DSN's
+  1 ppm trust gate refused 45% of node1's cycles over an hour (2026-10-25).
+- The loop now uses the median of its in-range deltas, so up to three glitched seconds in
+  eight don't move it. The median is self-tested in `test_xo_correct.sh`.
+
+### pluto_ctld: ~1 s gated captures, correct arming, zero-copy
 
 - **Fixed: a gated capture could start before its PPS edge and carry that edge's label.**
   ADI's `axi_dmac` starts each segment on the first sample with its sync HIGH (a level
@@ -10,10 +27,15 @@
   0.5 s captures started 375 ms early and 0.9 s ones 643 ms early, with a gap where the
   DMA waited for the next window, labeled with that later edge. That hit any gated capture
   whose window (1.5× the capture + offset) was still open ~0.35 s before `t0_gps`:
-  captures over ~0.43 s, or over ~0.1 s when the request came < 1 s ahead. The window
-  output is now held low (`drive_pins` clear) until the buffer is queued, then released in
-  the closed gap before the edge (`FRAME_POS` checked around the one-bit write); the DMA
-  starts within 0.1 ms of the latched edge.
+  captures over ~0.43 s (with a live PPS on node1, a 0.4 s capture landed on its edge and
+  a 0.6 s one started ~0.2 s early). The window output is now held low (`drive_pins`
+  clear) until the buffer is queued, then released in the closed gap before the edge
+  (`FRAME_POS` checked around the one-bit write); the DMA starts within 0.1 ms of the
+  latched edge (0.04–0.95 s at 5, 20 and 30.72 MS/s, live PPS).
+- **Fixed: a running `axi_tdd` defeated the gate.** A synced core (`sync_soft`, or any
+  sync source) can't be disabled while running, so channel 1 stayed HIGH and a gated
+  capture started at once. `configure_tdd` now parks such a core first (`burst_count` 1,
+  then disable). See `docs/GOTCHAS.md`.
 - **Fixed: the first gated capture after boot was not gated.** A disabled `axi_tdd` holds
   channel 1 at its latched polarity, whose boot default is HIGH on Pluto
   (`TDD_DEFAULT_POL 0b010`), so the RX-DMA OR stayed open until a capture had once
@@ -38,7 +60,7 @@
 - Hardware-tested on a Pluto+ without a PPS (free-running frame; ungated captures to
   0.96 s / 118 MB). Not yet run against a live PPS.
 
-## Unreleased — pps_counter: `tdd_armed`, explicit AXI interface
+### pps_counter: `tdd_armed`, explicit AXI interface
 
 - New `tdd_armed` output: high while the PPS window drives `tdd_enable`
   (`TDD_CTRL` enable and drive_pins). For designs that share the capture-start
