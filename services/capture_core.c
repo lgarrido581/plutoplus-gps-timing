@@ -89,9 +89,7 @@ static int configure_tdd(struct iio_context *ctx) {
 /* Restore free-running streaming RX WITHOUT a reboot. A gated capture disabled axi_tdd (to
  * yield the RX-DMA OR to pps_counter); re-enable it full-open (channel1 always HIGH) so the
  * OR is HIGH again and the RX DMA captures freely, and drop pps_counter's window so only
- * axi_tdd gates streaming. An enabled axi_tdd runs no frame until something syncs it --
- * until then its channels sit LOW and any free-running RX (or TX) DMA starves with errno 110,
- * which looks like a wedge -- so start the frame with sync_soft. */
+ * axi_tdd gates streaming. */
 static void restore_rx_mode(long long frame_len, long long rate) {
     if (g_tdd_v2) {
         long long flen = frame_len > 1 ? frame_len : rate;
@@ -103,7 +101,6 @@ static void restore_rx_mode(long long frame_len, long long rate) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 1);
         sysfs_write("enable", 1);
-        sysfs_write("sync_soft", 1);
         pps_ts_disable_frame();
         return;
     }
@@ -119,8 +116,7 @@ static void restore_rx_mode(long long frame_len, long long rate) {
             iio_channel_attr_write(ch1, "polarity", "0");
             iio_channel_attr_write(ch1, "enable", "1");
         }
-        iio_device_attr_write(g_tdd, "enable", "1");
-        iio_device_attr_write(g_tdd, "sync_soft", "1");   /* frame runs: ch1 HIGH -> OR HIGH */
+        iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
     }
     pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
 }
