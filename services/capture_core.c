@@ -201,6 +201,9 @@ static long long max_block_bytes(void) {
 
 long long capture_block_cap(void) { return max_block_bytes(); }
 
+int  capture_gate_hold(struct iio_context *ctx) { return configure_tdd(ctx); }
+void capture_gate_open(long long frame_len, long long rate_hz) { restore_rx_mode(frame_len, rate_hz); }
+
 int capture_run(const capture_req_t *req, capture_result_t *out) {
     out->meta_json = NULL; out->iq = NULL; out->iq_len = 0; out->priv = NULL;
     out->err[0] = '\0';

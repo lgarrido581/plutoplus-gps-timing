@@ -55,6 +55,15 @@ void capture_release(capture_result_t *out);
 /* The kernel's DMA block cap in bytes (one capture must fit in one block), 0 if unknown. */
 long long capture_block_cap(void);
 
+/* The RX-DMA sync gate, for a caller that drives the DMA itself (iq_stream.c).
+ * capture_gate_hold: axi_tdd off with channel 1 latched LOW, so pps_counter's window alone
+ * gates the DMA (returns 0, or -1 without an axi_tdd). capture_gate_open: axi_tdd
+ * full-open and running (channel 1 HIGH but for one clock per frame_len) and the
+ * pps_counter window off -- free-running RX. */
+struct iio_context;
+int  capture_gate_hold(struct iio_context *ctx);
+void capture_gate_open(long long frame_len, long long rate_hz);
+
 #ifdef __cplusplus
 }
 #endif
