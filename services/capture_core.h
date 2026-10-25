@@ -56,13 +56,16 @@ void capture_release(capture_result_t *out);
 long long capture_block_cap(void);
 
 /* The RX-DMA sync gate, for a caller that drives the DMA itself (iq_stream.c).
- * capture_gate_hold: axi_tdd off with channel 1 latched LOW, so pps_counter's window alone
- * gates the DMA (returns 0, or -1 without an axi_tdd). capture_gate_open: axi_tdd
- * full-open and running (channel 1 HIGH but for one clock per frame_len) and the
- * pps_counter window off -- free-running RX. */
+ * capture_gate_hold: axi_tdd parked if it was running, then off with channel 1 latched LOW,
+ * so pps_counter's window alone gates the DMA (0; -1 without an axi_tdd; -2 if it would
+ * not park). capture_gate_open: what a capture leaves -- axi_tdd re-enabled full-open but
+ * never synced (armed), pps_counter window off. capture_gate_steady: channel 1 HIGH
+ * steadily with the core armed, never synced (so still stoppable): channel 1 disabled at
+ * polarity 1 drives its latched polarity. Call after capture_gate_hold (0 or -1). */
 struct iio_context;
 int  capture_gate_hold(struct iio_context *ctx);
 void capture_gate_open(long long frame_len, long long rate_hz);
+int  capture_gate_steady(void);
 
 #ifdef __cplusplus
 }

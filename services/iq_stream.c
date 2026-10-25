@@ -45,7 +45,7 @@
 #define DMA_STATUS  0x80000088u    /* ADC core register (DEBUGFS_DRA_PCORE_REG_MAGIC) */
 #define DMA_OVF     0x4u
 #define LOCK_PATH   "/tmp/pluto_ctld.capturing"
-#define GATE_FRAME  2000000000LL   /* axi_tdd frame while streaming: one LOW clock per frame */
+#define XO_STATE    "/run/xo_state"
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int s) { (void)s; g_stop = 1; }
@@ -70,6 +70,27 @@ static void block_sent(void *data, void *hint) {
 }
 
 static int die(const char *m) { fprintf(stderr, "iq_stream: %s\n", m); return 1; }
+
+/* xo_correct.sh's state line: timing is trustworthy only once it says LOCKED. */
+static int xo_locked(void) {
+    char line[256] = "";
+    FILE *f = fopen(XO_STATE, "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof line, f)) {}
+    fclose(f);
+    return strstr(line, "state=LOCKED") != NULL;
+}
+
+/* PPS_SEQ, PPS_COUNT and LIVE_COUNT as one consistent snapshot (no PPS between the reads). */
+static void pps_snapshot(const pps_ts_t *p, uint32_t *seq, uint32_t *ppsc, uint32_t *live) {
+    for (int i = 0; i < 3; i++) {
+        uint32_t s1 = p->regs[R_PPS_SEQ];
+        *ppsc = p->regs[R_PPS_COUNT];
+        *live = p->regs[R_LIVE];
+        *seq = p->regs[R_PPS_SEQ];
+        if (*seq == s1) return;
+    }
+}
 
 int main(int argc, char **argv) {
     long long rate = 5000000, freq = 94700000;
@@ -130,6 +151,9 @@ int main(int argc, char **argv) {
     iio_channel_attr_read_longlong(p_lo, "frequency", &fc);
     iio_channel_enable(i0);
     iio_channel_enable(q0);
+    if (xo_locked() != 1)
+        fprintf(stderr, "iq_stream: WARNING %s is not LOCKED -- frame and latch timing are "
+                "unreliable until it is\n", XO_STATE);
     lock_touch();
 
     void *zctx = zmq_ctx_new();
@@ -143,23 +167,23 @@ int main(int argc, char **argv) {
     long long frame_len = (long long)mult * rate;
     long long win = frame_len / 2;
     size_t n_blk = (size_t)((double)rate * block_ms / 1000.0) & ~(size_t)1023;
-    if (capture_gate_hold(ctx) != 0) return die("axi_tdd not found");
+    int gh = capture_gate_hold(ctx);
+    if (gh != 0) return die(gh == -2 ? "axi_tdd is running and would not park" : "axi_tdd not found");
     if (pps_ts_config_frame((uint32_t)frame_len, 0, (uint32_t)win) != 0)
         return die("pps_counter frame config failed");
     uint32_t lseq_prev = 0;
     pps_ts_latch(&pps, NULL, &lseq_prev, NULL);
     /* arm the RX core's sync start around buffer creation, as capture_core does: without
      * it the DMA does not wait for the gate (a first block arrives with no edge latched) */
-    const char *am = getenv("IQ_ARM");           /* prototype: 0 none, 1 before, 2 after, 3 both */
-    int arm_mode = am ? atoi(am) : 3;
-    if ((arm_mode & 1) && iio_device_attr_write(rx, "sync_start_enable", "arm") < 0) {
+    iio_device_reg_write(rx, DMA_STATUS, DMA_OVF);  /* clear a stale sticky overflow */
+    if (iio_device_attr_write(rx, "sync_start_enable", "arm") < 0) {
         capture_gate_open(frame_len, rate);
         return die("sync_start_enable not settable");
     }
     iio_device_set_kernel_buffers_count(rx, (unsigned int)nblocks);
     struct iio_buffer *buf = iio_device_create_buffer(rx, n_blk, false);
     if (!buf) { capture_gate_open(frame_len, rate); return die("create_buffer failed"); }
-    if (arm_mode & 2) iio_device_attr_write(rx, "sync_start_enable", "arm");
+    iio_device_attr_write(rx, "sync_start_enable", "arm");
     iio_context_set_timeout(ctx, 3000);
     uint32_t pos = 0;
     if (!pps_ts_live(&pps, 1.5) ||
@@ -182,10 +206,11 @@ int main(int argc, char **argv) {
     while (!g_stop) {
         ssize_t nb = iio_buffer_refill(buf);
         if (nb < 0) { fprintf(stderr, "iq_stream: refill failed (%zd) at block %llu\n", nb, k); break; }
-        uint32_t live = pps.regs[R_LIVE];
+        uint32_t seq, ppsc, live;
+        pps_snapshot(&pps, &seq, &ppsc, &live);
         if (k == 0) {
-            /* sample 0 is the latched edge; then hand the gate to axi_tdd, open for good,
-             * before the 0.5 s window closes, and drop the window */
+            /* sample 0 is the latched edge; then hold the gate open steadily (axi_tdd armed,
+             * channel 1 HIGH) before the 0.5 s window closes, and drop the window */
             pps_ts_latch(&pps, &lc, &lseq, &lgps);
             if (lseq == lseq_prev || lgps == 0) {
                 fprintf(stderr, "iq_stream: no start edge latched (latch seq %u -> %u, count %u, "
@@ -195,10 +220,11 @@ int main(int argc, char **argv) {
                         pps.regs[0x34 / 4], pps.regs[R_PPS_SEQ]);
                 break;
             }
-            capture_gate_open(GATE_FRAME, rate);
+            if (capture_gate_steady() != 0) { fprintf(stderr, "iq_stream: could not hold the gate open\n"); break; }
+            pps_ts_disable_frame();
             t0_ns = lgps;
             start_sec = (long long)((lgps + 500000000ULL) / 1000000000ULL);
-            start_seq = pps.regs[R_PPS_SEQ];
+            start_seq = seq;
             seq_prev = start_seq;
             live_prev = lc;
             t_start = realtime_s();
@@ -216,13 +242,11 @@ int main(int argc, char **argv) {
         int ovf = iio_device_reg_read(rx, DMA_STATUS, &dma) == 0 && (dma & DMA_OVF);
         if (ovf) iio_device_reg_write(rx, DMA_STATUS, DMA_OVF);    /* sticky: clear */
 
-        char pbuf[96] = "null";
-        uint32_t seq = pps.regs[R_PPS_SEQ];
+        char pbuf[128] = "null";
         if (seq != seq_prev) {
-            uint32_t ppsc = pps.regs[R_PPS_COUNT];
             uint64_t pps64 = cnt64 - (uint32_t)(live - ppsc);       /* counts since sample 0 */
-            snprintf(pbuf, sizeof pbuf, "[%u, %.3f, %lld]", seq, (double)pps64 / mult,
-                     start_sec + (long long)(uint32_t)(seq - start_seq));
+            snprintf(pbuf, sizeof pbuf, "[%u, %.3f, %lld, %u, %u]", seq, (double)pps64 / mult,
+                     start_sec + (long long)(uint32_t)(seq - start_seq), ppsc, live);
             seq_prev = seq;
         }
         char hdr[384];
@@ -251,7 +275,7 @@ int main(int argc, char **argv) {
             dt > 0 ? sent_n * 4.0 / dt / 1e6 : 0.0, max_lag, (size_t)nblocks * n_blk, lost_blocks);
     iio_device_attr_write(rx, "sync_start_enable", "disarm");
     iio_buffer_destroy(buf);
-    capture_gate_open(frame_len, rate);              /* free-running RX, synced */
+    capture_gate_open(frame_len, rate);              /* as a capture leaves it */
     unlink(LOCK_PATH);
     zmq_close(push);
     zmq_ctx_term(zctx);

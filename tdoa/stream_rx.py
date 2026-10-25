@@ -92,6 +92,11 @@ if len(markers) >= 2:
           f"samples/s {np.mean(d_idx / d_sec):,.1f} (clock {np.mean(ppm):+.2f} ppm, "
           f"spread {np.ptp(ppm):.2f} ppm), first marker {markers[0][1]:.1f} samples "
           f"= {markers[0][1] / fs * 1e3:.3f} ms after sample 0")
+    if len(markers[0]) >= 5:
+        dc = [(b[3] - a[3]) % 2**32 for a, b in zip(markers, markers[1:])]
+        print("  raw PPS_COUNT spacing (counts):", " ".join(str(x) for x in dc))
+    print("  marker - (second x fs), samples:",
+          " ".join(f"{m[1] - (m[2] - markers[0][2] + markers[0][1] / fs) * fs:+.1f}" for m in markers))
 iq = ring.view("<i2").astype(np.float32)
 print(f"ring rms {np.sqrt(np.mean(iq ** 2)):.1f} counts, zero samples "
       f"{np.mean(iq == 0) * 100:.3f}%")
