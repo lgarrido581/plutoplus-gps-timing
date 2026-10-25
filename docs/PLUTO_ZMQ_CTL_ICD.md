@@ -94,10 +94,17 @@ then needs `t0_gps` more than 0.35 s after that PPS. So the lead a request needs
 **the retune + up to 1 s + 0.35 s**, at any capture length up to ~0.95 s:
 - **Same rate as the last request: send `t0_gps` ≥ ~1.5 s ahead.** The retune is then a
   set of same-value writes, ≤ ~0.2 s.
-- **A different `sample_rate_hz`: add up to ~1.5 s** (≥ 3 s ahead covers any request).
-  A new rate re-runs the AD9361's RX analog-filter calibration, which is slowest at low
-  bandwidths: measured 30.72 → 5 MS/s ≈ 1.5 s, 30.72 → 12.5 MS/s ≈ 0.7 s, back up to
-  30.72 MS/s ≈ 0.4 s.
+- **A different `sample_rate_hz`: add up to ~3 s** (≥ 4.5 s ahead covers any request).
+  A new rate re-runs the AD9361's RX analog-filter calibration, which is slowest at a
+  few MHz and varies between runs. Measured (rate + bandwidth writes):
+  - 30.72 → 2.5 MS/s ≈ 3.0 s;
+  - 2.5 → 5 MS/s ≈ 2.9 s;
+  - 30.72 → 5 MS/s ≈ 1.5–1.7 s;
+  - 30.72 → 12.5 MS/s ≈ 0.7–0.9 s;
+  - back up to 30.72 MS/s ≈ 0.4–0.5 s;
+  - 30.72 → 1 or 2 MS/s ≈ 0.4 s.
+
+  An LO change alone is ~20 ms, even 94.7 MHz ↔ 5.8 GHz.
 
 Measured on a Pluto+ with a live PPS, 2026-10-25, integer `t0_gps` sent exactly that far
 ahead: at a fixed rate 0.95 s captures work from 1.2 s (5 MS/s) and 1.1 s (30.72 MS/s);

@@ -38,9 +38,9 @@
   retunes and programs the window before its fresh-PPS liveness wait, so that PPS anchors
   the window. Programmed after it, the window started mid-second, and a 0.95 s capture
   needed `t0_gps` more than 2 s ahead. Now: ≥ ~1.5 s ahead at an unchanged rate, plus up
-  to ~1.5 s when the rate changes (the AD9361 re-runs its RX analog-filter calibration:
-  30.72 → 5 MS/s took 1.5 s). A request that is too late is refused with how far ahead
-  it still was.
+  to ~3 s when the rate changes (the AD9361 re-runs its RX analog-filter calibration,
+  slowest at a few MHz: 30.72 → 2.5 MS/s took 3.0 s, 30.72 → 5 MS/s 1.5 s). A request
+  that is too late is refused with how far ahead it still was.
 - **One DMA block per capture.** libiio asks for four by default and the mmap path
   allocated as many full-size blocks as CMA held: a 118 MB capture took 231 MB and 690 ms
   to allocate, now 115 MB and 309 ms.

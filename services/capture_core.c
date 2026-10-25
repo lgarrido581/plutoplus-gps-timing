@@ -399,8 +399,8 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
             if (ahead <= 0.0) {
                 char m[200];
                 snprintf(m, sizeof m, "t0_gps is %.2f s ahead after the retune and the PPS "
-                         "wait; send it further ahead (the retune takes up to ~1.5 s when "
-                         "the rate changes)", ahead + ARM_LEAD_S);
+                         "wait; send it further ahead (a new sample rate adds up to ~3 s of "
+                         "retune)", ahead + ARM_LEAD_S);
                 restore_rx_mode(frame_len, req->rate_hz);
                 pps_ts_close(&pps);
                 iio_context_destroy(ctx);
