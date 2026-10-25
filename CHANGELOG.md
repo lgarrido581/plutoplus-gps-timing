@@ -18,6 +18,11 @@
   channel 1 at its latched polarity, whose boot default is HIGH on Pluto
   (`TDD_DEFAULT_POL 0b010`), so the RX-DMA OR stayed open until a capture had once
   restored the core. `configure_tdd` now latches channel 1 LOW first.
+- **Fixed: free-running RX starved after every gated capture.** `restore_rx_mode()`
+  re-enabled `axi_tdd` full-open but never synced it, and an enabled core runs no frame
+  until a sync arrives: channel 1 stayed LOW, so any later free-running RX (or TX) DMA
+  failed with errno 110, which looked like a wedge needing a reboot. The restore now
+  issues `sync_soft`. Found by the radar bench sharing the radio (2026-10-25).
 - **Start self-check:** `ctl:start_check_ms` / `ctl:start_edge_latched` compare the latched
   edge with when the block finished, in raw counter ticks; a DMA that started early flags
   the capture `degraded`.
