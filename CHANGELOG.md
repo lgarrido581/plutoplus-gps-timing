@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — pluto_ctld: ~1 s gated captures, correct arming, zero-copy
+
+- **Fixed: a gated capture could start before its PPS edge and carry that edge's label.**
+  ADI's `axi_dmac` starts each segment on the first sample with its sync HIGH (a level
+  test); the DMA-start latch fires on a rising edge. The old order (window live from
+  configure, buffer created 0.35 s before `t0_gps`) queued the DMA into a still-open
+  window whenever the window outlived the arm point. Measured with a free-running frame,
+  0.5 s captures started 375 ms early and 0.9 s ones 643 ms early, with a gap where the
+  DMA waited for the next window, labeled with that later edge. That hit any gated capture
+  whose window (1.5× the capture + offset) was still open ~0.35 s before `t0_gps`:
+  captures over ~0.43 s, or over ~0.1 s when the request came < 1 s ahead. The window
+  output is now held low (`drive_pins` clear) until the buffer is queued, then released in
+  the closed gap before the edge (`FRAME_POS` checked around the one-bit write); the DMA
+  starts within 0.1 ms of the latched edge.
+- **Fixed: the first gated capture after boot was not gated.** A disabled `axi_tdd` holds
+  channel 1 at its latched polarity, whose boot default is HIGH on Pluto
+  (`TDD_DEFAULT_POL 0b010`), so the RX-DMA OR stayed open until a capture had once
+  restored the core. `configure_tdd` now latches channel 1 LOW first.
+- **Start self-check:** `ctl:start_check_ms` / `ctl:start_edge_latched` compare the latched
+  edge with when the block finished, in raw counter ticks; a DMA that started early flags
+  the capture `degraded`.
+- **Gated captures up to ~0.97 s** (was ~0.65 s): the window is the capture + 10 ms + 4096
+  samples (was 1.5× the capture). `t0_gps` must be more than the window + 20 ms ahead.
+- **One DMA block per capture.** libiio asks for four by default and the mmap path
+  allocated as many full-size blocks as CMA held: a 118 MB capture took 231 MB and 690 ms
+  to allocate, now 115 MB and 309 ms.
+- **Zero-copy reply:** the IQ frame is sent straight from the DMA buffer (was copied
+  twice); 118 MB reaches a GbE host at 45–55 MB/s. A consumer that stalls mid-reply
+  has its buffer parked, not freed under zmq.
+- `S66ctld` raises the kernel DMA block cap to 128 MiB (`CTL_MAX_BLOCK`) unless the U-Boot
+  env sets `iio_max_block_size`.
+- New metadata: `ctl:alloc_ms`, `ctl:max_block_size`, `ctl:arm_frame_pos`,
+  `ctl:start_check_ms`, `ctl:start_edge_latched`.
+- `ping` advertises `caps` (`held_arm`, `zero_copy`, `start_check`) and `max_block_size`,
+  so a client can size and schedule captures for the build it is talking to.
+- Hardware-tested on a Pluto+ without a PPS (free-running frame; ungated captures to
+  0.96 s / 118 MB). Not yet run against a live PPS.
+
 ## Unreleased — pps_counter: `tdd_armed`, explicit AXI interface
 
 - New `tdd_armed` output: high while the PPS window drives `tdd_enable`

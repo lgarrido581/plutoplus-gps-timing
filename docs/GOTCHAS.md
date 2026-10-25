@@ -27,3 +27,16 @@
 
 - **Spurious build exit code.** `docker-run.sh`'s `tee` pipeline can report a non-zero code even on a
   successful build. Trust the `Done.` line and `output/pluto.frm`.
+
+- **Never `sync_soft` the axi_tdd core on a radio that does gated captures.** After a sync the
+  core is RUNNING (`state` 3) with `burst_count` 0 and can't be stopped: `enable 0` reads back
+  0, but the core stays RUNNING and keeps driving its channels. Channel changes (enable,
+  polarity) apply only at the next frame end. If channel 1 (the RX-DMA sync) is left HIGH, the
+  next gated capture can't hold the gate LOW, so its DMA starts at once and the capture carries
+  the wrong label. Stop a running core with it enabled: `burst_count 1`, then `enable 0`; the
+  state drops to 0 (IDLE) within a frame. Then restore `burst_count 0` and enable without a sync
+  (ARMED, channels LOW): the state `pluto_ctld` leaves. Check with
+  `iio_attr -d iio-axi-tdd-0 state` (0 idle, 1 armed, 3 running). Seen on node1, 2026-10-25.
+
+- **`iio_attr -q` writes may silently not happen** on the shipped libiio 0.26. Use the plain
+  form and redirect its output.

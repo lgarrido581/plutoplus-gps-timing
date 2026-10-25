@@ -14,7 +14,22 @@ PIDFILE=/var/run/pluto_ctld.pid
 BIND="${ZMQ_BIND:-0.0.0.0}"
 PORT="${ZMQ_CTL_PORT:-5562}"
 
+# DMA block cap. A gap-free capture is ONE IIO DMA block. ADI's S21misc sets the cap at
+# boot from the U-Boot env iio_max_block_size, default 64 MiB (0.55 s at 30.72 MS/s).
+# Raise it to 128 MiB (1 s at 30.72 MS/s on one channel; CMA is 256 MB) unless the env
+# sets it explicitly, which still wins.
+MAX_BLOCK=/sys/module/industrialio_buffer_dma/parameters/max_block_size
+CTL_MAX_BLOCK="${CTL_MAX_BLOCK:-134217728}"
+raise_block_cap() {
+	[ -w "$MAX_BLOCK" ] || return 0
+	fw_printenv -n iio_max_block_size >/dev/null 2>&1 && return 0
+	cur=$(cat "$MAX_BLOCK")
+	[ "$cur" -lt "$CTL_MAX_BLOCK" ] && echo "$CTL_MAX_BLOCK" > "$MAX_BLOCK"
+	return 0
+}
+
 start() {
+	raise_block_cap
 	printf "Starting pluto_ctld on %s (REP %s): " "$BIND" "$PORT"
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
 		--bind "$BIND" --port "$PORT" \
