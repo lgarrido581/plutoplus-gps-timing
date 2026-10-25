@@ -31,12 +31,20 @@ typedef struct {
     volatile uint32_t *regs;   /* mmap'd register window */
     int   mem_fd;
     double nominal_cnt_hz;     /* fallback if PPS_DELTA looks invalid */
+    double cnt_tol;            /* PPS_DELTA counts only within this fraction of
+                                * nominal_cnt_hz (0.5 from pps_ts_init). A caller that
+                                * knows the nominal exactly tightens it: the second
+                                * after a sample-rate change counts a mix of both rates. */
 } pps_ts_t;
 
 /* Map the pps_counter. Returns 0 on success. nominal_cnt_hz is commonly 30.72e6
  * or 61.44e6 on Pluto+, and 122.88e6 on LibreSDR. It is only a sanity fallback;
- * the live PPS_DELTA wins. */
+ * the live PPS_DELTA wins while it is within cnt_tol of it. */
 int  pps_ts_init(pps_ts_t *p, double nominal_cnt_hz);
+
+/* The cnt_clk Hz the timestamp math uses for a PPS_DELTA reading: the reading itself
+ * when it is within cnt_tol of nominal_cnt_hz, else the nominal. */
+double pps_ts_cnt_used(const pps_ts_t *p, uint32_t pps_delta);
 void pps_ts_close(pps_ts_t *p);
 
 /* True if the hardware PPS latch has seen at least one edge (STATUS.pps_present).
@@ -74,12 +82,25 @@ typedef struct {
 void pps_ts_anchor(const pps_ts_t *p, pps_anchor_t *a);
 
 /* Configure the pps_counter PPS-anchored TDD frame (for GPS-sequenced capture):
- * FRAME_LEN/RX_START/RX_STOP (cnt_clk counts), then TDD_CTRL = enable|pps_sync_en.
- * tdd_sync then pulses at each frame start (re-anchored to the GPS second) -- in
- * the --hwlatch build that pulse drives the RX DMA sync. Opens its own RW mapping
- * (the read path stays RO). Returns 0 on success. frame_len must exceed the
+ * FRAME_LEN/RX_START/RX_STOP (cnt_clk counts), then TDD_CTRL = enable|pps_sync_en with
+ * the window output HELD LOW (drive_pins clear): the frame runs and re-anchors on every
+ * PPS, but tdd_enable stays 0 until pps_ts_drive_in_gap() releases it. Opens its own
+ * RW mapping (the read path stays RO). Returns 0 on success. frame_len must exceed the
  * capture length in cnt_clk counts (frame period > capture duration). */
 int pps_ts_config_frame(uint32_t frame_len, uint32_t rx_start, uint32_t rx_stop);
+
+/* Release the window output (set drive_pins) while this frame's RX window is closed, so
+ * the next rising edge on the RX-DMA sync is the NEXT frame's window, opened by the next
+ * PPS. The DMA starts on the first sample with its sync high and the latch fires only on
+ * a rising edge, so releasing into an open window would start the capture early under
+ * the next edge's label. Polls FRAME_POS until it is in [rx_stop + guard,
+ * frame_len - guard), sets drive_pins, then reads FRAME_POS again: if it went backwards,
+ * a PPS re-anchor raced the write. Only that one bit changes, so the window registers
+ * keep their stable-while-enabled contract. *pos = FRAME_POS at the release. Returns 0
+ * on success, -1 if deadline_s (CLOCK_REALTIME) passed first, -2 on a race, -3 if
+ * /dev/mem cannot be mapped. */
+int pps_ts_drive_in_gap(uint32_t frame_len, uint32_t rx_stop, uint32_t guard,
+                        double deadline_s, uint32_t *pos);
 
 /* Disable the frame (TDD_CTRL=0) -- restore the default inert state. */
 int pps_ts_disable_frame(void);

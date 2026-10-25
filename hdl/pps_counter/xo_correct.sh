@@ -58,6 +58,10 @@ scale_gain_milli() {
 calc_dxo() {
     echo $(($1 * $2 / 1000))
 }
+median() {  # median of the integer arguments (the two middle ones averaged when even)
+    printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 }
+        END { lo = int((NR + 1) / 2); hi = int(NR / 2) + 1; printf "%d\n", int((v[lo] + v[hi]) / 2) }'
+}
 
 # Hardware-free regression check for the rate-scaled gain and integer actuator
 # threshold. Kept in the production script so the tested math cannot drift.
@@ -67,6 +71,11 @@ if [ "${XO_CORRECT_SELFTEST:-0}" = 1 ]; then
     [ "$(calc_dxo 3 328)" = 0 ]
     [ "$(calc_dxo 4 328)" = 1 ]
     [ "$(calc_dxo -4 328)" = -1 ]
+    # One or three glitched seconds out of eight (inside MAXPPM) don't move the median.
+    [ "$(median 10000000 10000001 10000000 9999999 10000000 10000000 10000001 10000000)" = 10000000 ]
+    [ "$(median 10000000 10000001 10000000 10003944 10000000 10000000 10000001 10000000)" = 10000000 ]
+    [ "$(median 10002390 10000000 10000001 9997230 10000000 10001920 10000000 9999999)" = 10000000 ]
+    [ "$(median 7 3 5)" = 5 ]
     echo "xo_correct math self-test: PASS"
     exit 0
 fi
@@ -141,11 +150,15 @@ write_state() {  # $1=state  $2=holdover_elapsed_s
 [ "$(devmem $STATUS 32)" = "0x00000001" ] || { log "ERROR: PPS latch not present (STATUS != 1); verify the PPS input and FPGA timing build"; exit 1; }
 
 ps=""
-avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
-    # Echoes the average, or "BAD" if more than REJECT_MAX outliers arrive before
+avg_delta() {  # median of AVG in-range latched deltas; skip missed-edge outliers.
+    # Echoes the median, or "BAD" if more than REJECT_MAX outliers arrive before
     # AVG good samples (PPS missing/glitching) -> caller holds last good xo.
     # Echoes "NOPPS" if no new edge arrives within PPS_TIMEOUT s (-> holdover).
-    i=0; sum=0; rej=0; wt=$(date +%s)
+    # The median, not the mean: the sample clock occasionally gains tens to hundreds of
+    # counts in one second (seen on node1 with nothing retuning the radio, 2026-10-25),
+    # inside MAXPPM, and the mean of 8 then stepped xo by up to ~24 ppm the wrong way
+    # for ~9 s -- long enough for DSN's 1 ppm trust gate to refuse the node.
+    i=0; vals=""; rej=0; wt=$(date +%s)
     while [ "$i" -lt "$AVG" ]; do
         s=$(devmem $SEQ 32)
         if [ "$s" != "$ps" ]; then
@@ -153,7 +166,7 @@ avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
             d=$(devmem $DELTA 32); d=$((d))
             dev=$((d - NOMINAL)); [ "$dev" -lt 0 ] && dev=$((-dev))
             if [ "$dev" -le "$MAXDEV" ]; then
-                sum=$((sum + d)); i=$((i + 1))
+                vals="$vals $d"; i=$((i + 1))
             else
                 rej=$((rej + 1))
                 [ "$rej" -ge "$REJECT_MAX" ] && { echo BAD; return; }
@@ -163,7 +176,7 @@ avg_delta() {  # average AVG in-range latched deltas; skip missed-edge outliers.
             [ $(( $(date +%s) - wt )) -ge "$PPS_TIMEOUT" ] && { echo NOPPS; return; }
         fi
     done
-    echo $((sum / AVG))
+    median $vals
 }
 settle() {  # discard N edges after an xo write (PLL relock transient)
     k=0; while [ "$k" -lt "${1:-2}" ]; do s=$(devmem $SEQ 32); if [ "$s" != "$ps" ]; then ps="$s"; k=$((k + 1)); else $NAP; fi; done

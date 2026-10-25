@@ -34,16 +34,26 @@ typedef struct {
 } capture_req_t;
 
 typedef struct {
-    char    *meta_json;   /* malloc'd NUL-terminated SigMF JSON; caller free()s */
-    uint8_t *iq;          /* malloc'd ci16_le payload; caller free()s */
+    char    *meta_json;   /* malloc'd NUL-terminated SigMF JSON */
+    uint8_t *iq;          /* ci16_le payload: points INTO the DMA buffer (zero-copy);
+                           * valid until capture_release() */
     size_t   iq_len;      /* bytes (== samples * 4 on success) */
+    void    *priv;        /* the live iio buffer + context behind iq */
     char     err[256];    /* human error message when the call returns < 0 */
 } capture_result_t;
 
-/* Run ONE GPS-anchored capture. Returns 0 on success (out->meta_json and out->iq
- * are set and owned by the caller), <0 on failure (out->err set; nothing to free).
+/* Run ONE GPS-anchored capture. Returns 0 on success: out->meta_json and out->iq
+ * are set, and the caller MUST call capture_release() once it is done with them
+ * (the IQ stays in the DMA buffer, so a capture costs its size in memory once,
+ * not three times). Returns <0 on failure (out->err set; nothing to release).
  * Not thread-safe -- call serialized (the REP server already does, one at a time). */
 int capture_run(const capture_req_t *req, capture_result_t *out);
+
+/* Free what a successful capture_run() returned (DMA buffer, context, meta). */
+void capture_release(capture_result_t *out);
+
+/* The kernel's DMA block cap in bytes (one capture must fit in one block), 0 if unknown. */
+long long capture_block_cap(void);
 
 #ifdef __cplusplus
 }

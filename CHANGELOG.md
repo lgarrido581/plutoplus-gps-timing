@@ -1,6 +1,86 @@
 # Changelog
 
-## Unreleased — pps_counter: `tdd_armed`, explicit AXI interface
+## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
+
+Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
+`4c80a8c4…d87d0f`, unchanged since v2.0.4). The `pps_counter` HDL change below
+(`tdd_armed`, AXI interface attributes) adds an output that Pluto+ leaves unconnected, so
+this release does not re-synthesize. Pluto+ only: LibreSDR stays on v2.0.4 until it can be
+smoke-tested on that board.
+
+### xo_correct: steer on the median PPS delta, not the mean
+
+- The Pluto+ sample clock occasionally gains tens to hundreds of counts in one second,
+  inside `MAXPPM`. The 8-delta mean then stepped `xo_correction` by up to ~24 ppm the
+  wrong way, and stepped back ~9 s later. Meanwhile the clock really was off, and DSN's
+  1 ppm trust gate refused 45% of node1's cycles over an hour (2026-10-25).
+- The loop now uses the median of its in-range deltas, so up to three glitched seconds in
+  eight don't move it. The median is self-tested in `test_xo_correct.sh`.
+
+### pluto_ctld: ~1 s gated captures, correct arming, zero-copy
+
+- **Fixed: a gated capture could start before its PPS edge and carry that edge's label.**
+  ADI's `axi_dmac` starts each segment on the first sample with its sync HIGH (a level
+  test); the DMA-start latch fires on a rising edge. The old order (window live from
+  configure, buffer created 0.35 s before `t0_gps`) queued the DMA into a still-open
+  window whenever the window outlived the arm point. Measured with a free-running frame,
+  0.5 s captures started 375 ms early and 0.9 s ones 643 ms early, with a gap where the
+  DMA waited for the next window, labeled with that later edge. That hit any gated capture
+  whose window (1.5× the capture + offset) was still open ~0.35 s before `t0_gps`:
+  captures over ~0.43 s (with a live PPS on node1, a 0.4 s capture landed on its edge and
+  a 0.6 s one started ~0.2 s early). The window output is now held low (`drive_pins`
+  clear) until the buffer is queued, then released in the closed gap before the edge
+  (`FRAME_POS` checked around the one-bit write); the DMA starts within 0.1 ms of the
+  latched edge (0.04–0.95 s at 5, 20 and 30.72 MS/s, live PPS).
+- **Fixed: a running `axi_tdd` defeated the gate.** A synced core (`sync_soft`, or any
+  sync source) can't be disabled while running, so channel 1 stayed HIGH and a gated
+  capture started at once. `configure_tdd` now parks such a core first (`burst_count` 1,
+  then disable). See `docs/GOTCHAS.md`.
+- **Fixed: the first gated capture after boot was not gated.** A disabled `axi_tdd` holds
+  channel 1 at its latched polarity, whose boot default is HIGH on Pluto
+  (`TDD_DEFAULT_POL 0b010`), so the RX-DMA OR stayed open until a capture had once
+  restored the core. `configure_tdd` now latches channel 1 LOW first.
+- **Fixed: an ungated capture after a gated one never started.** The restore left
+  `axi_tdd` enabled without a sync — ARMED, every channel LOW — so the RX-DMA OR stayed
+  closed until a reboot. It now holds channel 1 HIGH as after boot (channel off, polarity
+  1, latched across `enable` 0 → 1), and `configure_tdd` disables the core before latching
+  channel 1 LOW, since writing `enable 1` to an enabled core latches nothing.
+- **Fixed: after a sample-rate change, captures used the old rate's counter.** For ~2 s
+  `PPS_DELTA` counts the old rate or a mix (25.72 M for 25.00 M). The start self-check
+  divided by it and flagged a correct 0.4 s capture `degraded` (−11 ms), and the
+  `l_clk` multiple was detected from it. Both now use `PPS_DELTA` only within 1000 ppm of
+  the nominal clock; the multiple falls back to the last one a settled count confirmed.
+  New `ctl:cnt_clk_settled` says which was used.
+- **Start self-check:** `ctl:start_check_ms` / `ctl:start_edge_latched` compare the latched
+  edge with when the block finished, in raw counter ticks; a DMA that started early flags
+  the capture `degraded`.
+- **Gated captures up to ~0.97 s** (was ~0.65 s): the window is the capture + 10 ms + 4096
+  samples (was 1.5× the capture).
+- **The lead `t0_gps` needs no longer depends on the capture length.** The server now
+  retunes and programs the window before its fresh-PPS liveness wait, so that PPS anchors
+  the window. Programmed after it, the window started mid-second, and a 0.95 s capture
+  needed `t0_gps` more than 2 s ahead. Now: ≥ ~1.5 s ahead at an unchanged rate, plus up
+  to ~3 s when the rate changes (the AD9361 re-runs its RX analog-filter calibration,
+  slowest at a few MHz: 30.72 → 2.5 MS/s took 3.0 s, 30.72 → 5 MS/s 1.5 s). A request
+  that is too late is refused with how far ahead it still was.
+- **One DMA block per capture.** libiio asks for four by default and the mmap path
+  allocated as many full-size blocks as CMA held: a 118 MB capture took 231 MB and 690 ms
+  to allocate, now 115 MB and 309 ms.
+- **Zero-copy reply:** the IQ frame is sent straight from the DMA buffer (was copied
+  twice); 118 MB reaches a GbE host at 45–55 MB/s. A consumer that stalls mid-reply
+  has its buffer parked, not freed under zmq.
+- `S66ctld` raises the kernel DMA block cap to 128 MiB (`CTL_MAX_BLOCK`) unless the U-Boot
+  env sets `iio_max_block_size`.
+- New metadata: `ctl:alloc_ms`, `ctl:max_block_size`, `ctl:arm_frame_pos`,
+  `ctl:start_check_ms`, `ctl:start_edge_latched`, `ctl:cnt_clk_settled`.
+- `ping` advertises `caps` (`held_arm`, `zero_copy`, `start_check`) and `max_block_size`,
+  so a client can size and schedule captures for the build it is talking to.
+- Hardware-tested on node1's Pluto+ with a live PPS: gated 0.04–0.95 s captures at 5,
+  12.5 and 30.72 MS/s, most requests retuning, with ungated captures in between — 36/36
+  latched their edge (`start_check_ms` +0.07 to +0.12, sample 0 within 0.1 µs of
+  `t0_gps`), none `degraded`.
+
+### pps_counter: `tdd_armed`, explicit AXI interface
 
 - New `tdd_armed` output: high while the PPS window drives `tdd_enable`
   (`TDD_CTRL` enable and drive_pins). For designs that share the capture-start

@@ -1,7 +1,8 @@
 /*
- * pps_timestamp.c - see pps_timestamp.h. VENDORED verbatim from the DSN/sdr-stack
+ * pps_timestamp.c - see pps_timestamp.h. VENDORED from the DSN/sdr-stack
  * device/streamer (validated on hardware: LIVE_COUNT advances at PPS_DELTA, the
- * counter->GPS-time map agrees with the disciplined system clock).
+ * counter->GPS-time map agrees with the disciplined system clock); the held window
+ * output and pps_ts_drive_in_gap() were added here.
  */
 #define _POSIX_C_SOURCE 199309L   /* clock_gettime / CLOCK_REALTIME */
 #include "pps_timestamp.h"
@@ -19,7 +20,7 @@
 #define MAP_SIZE      0x1000
 
 int pps_ts_init(pps_ts_t *p, double nominal_cnt_hz) {
-    p->regs = NULL; p->mem_fd = -1; p->nominal_cnt_hz = nominal_cnt_hz;
+    p->regs = NULL; p->mem_fd = -1; p->nominal_cnt_hz = nominal_cnt_hz; p->cnt_tol = 0.5;
     int fd = open("/dev/mem", O_RDONLY | O_SYNC);
     if (fd < 0) return -1;
     void *m = mmap(NULL, MAP_SIZE, PROT_READ, MAP_SHARED, fd, (off_t)PPS_COUNTER_BASE);
@@ -57,6 +58,14 @@ uint32_t pps_ts_cnt_hz(const pps_ts_t *p) {
     return p->regs ? p->regs[REG_PPS_DELTA] : 0;
 }
 
+double pps_ts_cnt_used(const pps_ts_t *p, uint32_t pps_delta) {
+    double cnt = (double)pps_delta;
+    double tol = p->nominal_cnt_hz * p->cnt_tol;
+    if (cnt < p->nominal_cnt_hz - tol || cnt > p->nominal_cnt_hz + tol)
+        cnt = p->nominal_cnt_hz;              /* PPS_DELTA not (yet) valid */
+    return cnt;
+}
+
 /* Most recent integer second of the PPS-disciplined system clock = GPS time of
  * the last PPS edge (PPS fires on the GPS second). */
 static uint64_t last_pps_gps_ns(void) {
@@ -71,9 +80,7 @@ uint64_t pps_ts_now_ns(const pps_ts_t *p) {
     uint32_t pps_count = p->regs[REG_PPS_COUNT];
     uint32_t live      = p->regs[REG_LIVE];
     uint64_t base_ns   = last_pps_gps_ns();
-    double   cnt_hz    = (double)p->regs[REG_PPS_DELTA];
-    if (cnt_hz < p->nominal_cnt_hz * 0.5 || cnt_hz > p->nominal_cnt_hz * 1.5)
-        cnt_hz = p->nominal_cnt_hz;          /* PPS_DELTA not yet valid */
+    double   cnt_hz    = pps_ts_cnt_used(p, p->regs[REG_PPS_DELTA]);
     /* (live - pps_count) is modulo-2^32; the cast handles wrap within one second. */
     uint32_t since = live - pps_count;
     return base_ns + (uint64_t)((double)since / cnt_hz * 1e9 + 0.5);
@@ -89,6 +96,9 @@ uint64_t pps_ts_buffer_start_ns(const pps_ts_t *p, uint64_t n_samples, double fs
 #define REG_FRAME_LEN (0x20 / 4)
 #define REG_RX_START  (0x24 / 4)
 #define REG_RX_STOP   (0x28 / 4)
+#define REG_FRAME_POS (0x34 / 4)
+#define TDD_CTRL_HELD  0x3         /* enable|pps_sync_en: frame runs, output low */
+#define TDD_CTRL_DRIVE 0x7         /* + drive_pins: tdd_enable outputs the window */
 
 /* RW-map the pps_counter just long enough to write the frame regs. */
 static int frame_write(uint32_t ctrl, uint32_t flen, uint32_t rxa, uint32_t rxo) {
@@ -108,10 +118,41 @@ static int frame_write(uint32_t ctrl, uint32_t flen, uint32_t rxa, uint32_t rxo)
 }
 
 int pps_ts_config_frame(uint32_t frame_len, uint32_t rx_start, uint32_t rx_stop) {
-    /* enable|pps_sync_en|drive_pins: drive_pins (bit2) is REQUIRED for tdd_enable to
-     * output the RX-window level; the BD ORs tdd_enable into the RX-DMA sync, so without
-     * it the window never opens. pps_sync_en resets the frame on each PPS -> GPS-locked. */
-    return frame_write(0x7, frame_len, rx_start, rx_stop);
+    /* enable|pps_sync_en: the frame resets on each PPS -> GPS-locked. drive_pins (bit2)
+     * stays clear, so tdd_enable -- ORed into the RX-DMA sync -- holds low until
+     * pps_ts_drive_in_gap() sets it. */
+    return frame_write(TDD_CTRL_HELD, frame_len, rx_start, rx_stop);
+}
+
+static double realtime_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+int pps_ts_drive_in_gap(uint32_t frame_len, uint32_t rx_stop, uint32_t guard,
+                        double deadline_s, uint32_t *pos) {
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return -3;
+    volatile uint32_t *r = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, fd, (off_t)PPS_COUNTER_BASE);
+    if (r == MAP_FAILED) { close(fd); return -3; }
+    struct timespec pause = { 0, 200000L };   /* 0.2 ms; the gap is >= 20 ms */
+    int rc = -1;
+    while (realtime_now() < deadline_s) {
+        uint32_t p0 = r[REG_FRAME_POS];
+        if (p0 >= rx_stop + guard && p0 + guard < frame_len) {
+            r[REG_TDD_CTRL] = TDD_CTRL_DRIVE;
+            uint32_t p1 = r[REG_FRAME_POS];
+            if (pos) *pos = p0;
+            rc = (p1 >= p0) ? 0 : -2;
+            break;
+        }
+        nanosleep(&pause, NULL);
+    }
+    munmap((void *)r, MAP_SIZE);
+    close(fd);
+    return rc;
 }
 
 int pps_ts_disable_frame(void) {
@@ -126,9 +167,7 @@ bool pps_ts_latch(const pps_ts_t *p, uint32_t *count, uint32_t *seq, uint64_t *g
     uint32_t lc   = p->regs[REG_LATCH_COUNT];
     uint32_t ls   = p->regs[REG_LATCH_SEQ];
     uint32_t ppsc = p->regs[REG_PPS_COUNT];
-    double cnt = (double)p->regs[REG_PPS_DELTA];
-    if (cnt < p->nominal_cnt_hz * 0.5 || cnt > p->nominal_cnt_hz * 1.5)
-        cnt = p->nominal_cnt_hz;
+    double cnt = pps_ts_cnt_used(p, p->regs[REG_PPS_DELTA]);
     if (count)  *count  = lc;
     if (seq)    *seq    = ls;
     if (gps_ns) {
@@ -160,9 +199,7 @@ void pps_ts_anchor(const pps_ts_t *p, pps_anchor_t *a) {
     a->pps_seq    = p->regs[REG_PPS_SEQ];
     a->cnt_hz     = p->regs[REG_PPS_DELTA];
     a->present    = (p->regs[REG_STATUS] & 0x1) != 0;
-    double cnt_hz = (double)a->cnt_hz;
-    if (cnt_hz < p->nominal_cnt_hz * 0.5 || cnt_hz > p->nominal_cnt_hz * 1.5)
-        cnt_hz = p->nominal_cnt_hz;
+    double cnt_hz = pps_ts_cnt_used(p, a->cnt_hz);
     uint32_t since = a->live_count - a->pps_count;
     a->gps_ns = last_pps_gps_ns() + (uint64_t)((double)since / cnt_hz * 1e9 + 0.5);
 }
