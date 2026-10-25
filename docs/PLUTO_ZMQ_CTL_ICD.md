@@ -60,9 +60,9 @@ Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
 - `caps` (absent on older builds) says what `capture` can do, so a client can size and
   schedule captures without trial and error:
   - `held_arm` — the window is released only once the buffer is queued (§7, arming): a
-    capture fits in `offset + samples + 10 ms + 4096 samples ≤ 1 s − 20 ms`, and
-    `t0_gps` must lead by more than that window + 20 ms. Without it: the window is 1.5×
-    the capture, armed 0.35 s before `t0_gps`.
+    capture fits in `offset + samples + 10 ms + 4096 samples ≤ 1 s − 20 ms`, and the
+    lead `t0_gps` needs doesn't depend on its length (§4). Without it: the window is
+    1.5× the capture, armed 0.35 s before `t0_gps`.
   - `zero_copy` — the IQ frame is sent straight from the DMA buffer.
   - `start_check` — `ctl:start_check_ms` / `ctl:start_edge_latched` are in the meta.
 - `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
@@ -88,12 +88,22 @@ A single JSON object. Optional fields are omitted when unset — do not assume p
 
 \* When `tdd_sync` is true, `t0_gps` is supplied and the server releases the PPS window
 into the DMA in the second before it (§7, arming) — so every node given the same `t0_gps`
-grabs the **same** PPS edge. The server first waits for a fresh PPS (up to 1 s) to prove
-the GPS is live, then needs `t0_gps` at least 0.35 s, and more than the capture window +
-20 ms, after that PPS. In practice: **send `t0_gps` more than ~1.05 s ahead**, at any
-capture length up to ~0.95 s. Measured on a Pluto+ with a live PPS, 2026-10-25: a request
-0.95 s ahead is refused ("t0_gps must be 0.35 to 60 seconds in the future"), 1.05 s works,
-for 0.04 s and 0.9 s captures alike.
+grabs the **same** PPS edge. Before that the server retunes, programs the window, and
+waits for a fresh PPS (up to 1 s) that proves the GPS is live and anchors the window; it
+then needs `t0_gps` more than 0.35 s after that PPS. So the lead a request needs is
+**the retune + up to 1 s + 0.35 s**, at any capture length up to ~0.95 s:
+- **Same rate as the last request: send `t0_gps` ≥ ~1.5 s ahead.** The retune is then a
+  set of same-value writes, ≤ ~0.2 s.
+- **A different `sample_rate_hz`: add up to ~1.5 s** (≥ 3 s ahead covers any request).
+  A new rate re-runs the AD9361's RX analog-filter calibration, which is slowest at low
+  bandwidths: measured 30.72 → 5 MS/s ≈ 1.5 s, 30.72 → 12.5 MS/s ≈ 0.7 s, back up to
+  30.72 MS/s ≈ 0.4 s.
+
+Measured on a Pluto+ with a live PPS, 2026-10-25, integer `t0_gps` sent exactly that far
+ahead: at a fixed rate 0.95 s captures work from 1.2 s (5 MS/s) and 1.1 s (30.72 MS/s);
+a request sent too late is refused with how far ahead it still was after the retune and
+the PPS wait. (The first v2.1.0 build programmed the window after that PPS, so a long
+window started mid-second and needed ~1 s more lead than a short one.)
 
 ## 5. `capture` — success reply (two frames)
 
@@ -155,6 +165,12 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   the edge it is labeled with; the capture is flagged `degraded` — drop it.
   `captures[0]["ctl:arm_frame_pos"]` (integer `cnt_clk` counts) is where in the frame the
   window was released (§7, arming). All three are 0 / true for ungated captures.
+- `captures[0]["ctl:cnt_clk_settled"]` (bool) — whether `PPS_DELTA` (the counts in the
+  last GPS second, reported raw as `gpsanchor:cnt_clk_hz`) was within 1000 ppm of
+  `l_clk` for this rate. Within ~2 s of a sample-rate change it counts a mix of the old
+  and new rates; the server then converts counts to time at the nominal `l_clk`
+  instead, and `timing:health.xo_ppm` (computed from the raw value) is meaningless for
+  that capture.
 
 ### Frame 1 — IQ payload (raw bytes)
 
@@ -171,8 +187,9 @@ the capture ends over GbE (≈ 45–55 MB/s).
 Used for: PPS absent while `require_gps`; `tdd_sync` without a live PPS (arming an
 unfillable window would wedge the DMA); `sample_rate_hz` over the channel-mode max (§7);
 `offset_samples + samples` past the PPS window (the message gives the largest
-`samples` that fits); `t0_gps` too close for the capture window (the message gives the
-lead needed); a buffer over the DMA block cap or CMA; the window not releasable before
+`samples` that fits); `t0_gps` less than 0.35 s or more than 60 s ahead on arrival, or no
+longer ahead after the retune and the PPS wait (the message gives how far ahead it was;
+§4 has the lead); a buffer over the DMA block cap or CMA; the window not releasable before
 the edge ("window still open at the arm deadline", e.g. a slow allocation); the previous
 reply's IQ still unsent (§7); a DMA/refill fault; a malformed/unknown request. The reply is always exactly one frame.
 
@@ -182,10 +199,15 @@ reply's IQ still unsent (§7); a DMA/refill fault; a malformed/unknown request. 
   programs `pps_counter`'s RX window, whose frame resets on every GPS PPS. The
   FPGA ORs that window with the normal AXI-TDD streaming gate before the RX DMA.
   One contiguous `iio_buffer_refill` = one gap-free DMA block. After the grab,
-  the server disables the PPS window and restores AXI-TDD full-open streaming.
-  A disabled `axi_tdd` holds channel 1 at its *latched* polarity, which after boot is
-  the synthesis default — HIGH on Pluto — so the server first runs the core once with
-  channel 1 off at polarity 0 to latch it LOW.
+  the server disables the PPS window and holds channel 1 HIGH again, as after boot, so
+  ungated captures stream freely.
+  With channel 1 off, `axi_tdd` drives it at its *latched* polarity, which after boot is
+  the synthesis default — HIGH on Pluto — and which latches only across an `enable`
+  0 → 1 transition. So a gated capture first disables the core, then runs it once with
+  channel 1 off at polarity 0 to latch it LOW; the restore does the same at polarity 1.
+  (A full-open window — on 0, off = frame — does not hold it HIGH: enabled without a
+  sync, the core sits ARMED with every channel LOW, and builds before v2.1.0 left it that
+  way, so an ungated capture after a gated one never started.)
 - **Arming.** ADI's `axi_dmac` (`SYNC_TRANSFER_START`) starts each ≤ 16 MB segment on
   the first sample with its sync HIGH — a level test, not an edge — while the latch
   fires only on a rising edge. So a buffer queued while a window is already open starts
@@ -205,7 +227,9 @@ reply's IQ still unsent (§7); a DMA/refill fault; a malformed/unknown request. 
 - **Rate cap (enforced).** The AD936x data clock is
   `l_clk = interface_multiplier × sample_rate`; overrunning the interface wedges
   the RX DMA (reboot to clear). The server detects the multiplier from the live
-  counter and current rate. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
+  counter and current rate, accepting only a count within 1000 ppm of a whole multiple
+  (right after a rate change the counter still holds the old rate), and otherwise uses
+  the last multiple it confirmed. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
   1×/2×); LibreSDR's validated 2R2T LVDS path uses 4× with a 122.88 MHz ceiling.
   Both therefore cap the common 2R2T configuration at 30.72 MSPS.
 - **Capture length.** One capture is one DMA block, gap-free. Three limits apply:

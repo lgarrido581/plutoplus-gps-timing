@@ -31,12 +31,20 @@ typedef struct {
     volatile uint32_t *regs;   /* mmap'd register window */
     int   mem_fd;
     double nominal_cnt_hz;     /* fallback if PPS_DELTA looks invalid */
+    double cnt_tol;            /* PPS_DELTA counts only within this fraction of
+                                * nominal_cnt_hz (0.5 from pps_ts_init). A caller that
+                                * knows the nominal exactly tightens it: the second
+                                * after a sample-rate change counts a mix of both rates. */
 } pps_ts_t;
 
 /* Map the pps_counter. Returns 0 on success. nominal_cnt_hz is commonly 30.72e6
  * or 61.44e6 on Pluto+, and 122.88e6 on LibreSDR. It is only a sanity fallback;
- * the live PPS_DELTA wins. */
+ * the live PPS_DELTA wins while it is within cnt_tol of it. */
 int  pps_ts_init(pps_ts_t *p, double nominal_cnt_hz);
+
+/* The cnt_clk Hz the timestamp math uses for a PPS_DELTA reading: the reading itself
+ * when it is within cnt_tol of nominal_cnt_hz, else the nominal. */
+double pps_ts_cnt_used(const pps_ts_t *p, uint32_t pps_delta);
 void pps_ts_close(pps_ts_t *p);
 
 /* True if the hardware PPS latch has seen at least one edge (STATUS.pps_present).

@@ -20,7 +20,7 @@
 #define MAP_SIZE      0x1000
 
 int pps_ts_init(pps_ts_t *p, double nominal_cnt_hz) {
-    p->regs = NULL; p->mem_fd = -1; p->nominal_cnt_hz = nominal_cnt_hz;
+    p->regs = NULL; p->mem_fd = -1; p->nominal_cnt_hz = nominal_cnt_hz; p->cnt_tol = 0.5;
     int fd = open("/dev/mem", O_RDONLY | O_SYNC);
     if (fd < 0) return -1;
     void *m = mmap(NULL, MAP_SIZE, PROT_READ, MAP_SHARED, fd, (off_t)PPS_COUNTER_BASE);
@@ -58,6 +58,14 @@ uint32_t pps_ts_cnt_hz(const pps_ts_t *p) {
     return p->regs ? p->regs[REG_PPS_DELTA] : 0;
 }
 
+double pps_ts_cnt_used(const pps_ts_t *p, uint32_t pps_delta) {
+    double cnt = (double)pps_delta;
+    double tol = p->nominal_cnt_hz * p->cnt_tol;
+    if (cnt < p->nominal_cnt_hz - tol || cnt > p->nominal_cnt_hz + tol)
+        cnt = p->nominal_cnt_hz;              /* PPS_DELTA not (yet) valid */
+    return cnt;
+}
+
 /* Most recent integer second of the PPS-disciplined system clock = GPS time of
  * the last PPS edge (PPS fires on the GPS second). */
 static uint64_t last_pps_gps_ns(void) {
@@ -72,9 +80,7 @@ uint64_t pps_ts_now_ns(const pps_ts_t *p) {
     uint32_t pps_count = p->regs[REG_PPS_COUNT];
     uint32_t live      = p->regs[REG_LIVE];
     uint64_t base_ns   = last_pps_gps_ns();
-    double   cnt_hz    = (double)p->regs[REG_PPS_DELTA];
-    if (cnt_hz < p->nominal_cnt_hz * 0.5 || cnt_hz > p->nominal_cnt_hz * 1.5)
-        cnt_hz = p->nominal_cnt_hz;          /* PPS_DELTA not yet valid */
+    double   cnt_hz    = pps_ts_cnt_used(p, p->regs[REG_PPS_DELTA]);
     /* (live - pps_count) is modulo-2^32; the cast handles wrap within one second. */
     uint32_t since = live - pps_count;
     return base_ns + (uint64_t)((double)since / cnt_hz * 1e9 + 0.5);
@@ -161,9 +167,7 @@ bool pps_ts_latch(const pps_ts_t *p, uint32_t *count, uint32_t *seq, uint64_t *g
     uint32_t lc   = p->regs[REG_LATCH_COUNT];
     uint32_t ls   = p->regs[REG_LATCH_SEQ];
     uint32_t ppsc = p->regs[REG_PPS_COUNT];
-    double cnt = (double)p->regs[REG_PPS_DELTA];
-    if (cnt < p->nominal_cnt_hz * 0.5 || cnt > p->nominal_cnt_hz * 1.5)
-        cnt = p->nominal_cnt_hz;
+    double cnt = pps_ts_cnt_used(p, p->regs[REG_PPS_DELTA]);
     if (count)  *count  = lc;
     if (seq)    *seq    = ls;
     if (gps_ns) {
@@ -195,9 +199,7 @@ void pps_ts_anchor(const pps_ts_t *p, pps_anchor_t *a) {
     a->pps_seq    = p->regs[REG_PPS_SEQ];
     a->cnt_hz     = p->regs[REG_PPS_DELTA];
     a->present    = (p->regs[REG_STATUS] & 0x1) != 0;
-    double cnt_hz = (double)a->cnt_hz;
-    if (cnt_hz < p->nominal_cnt_hz * 0.5 || cnt_hz > p->nominal_cnt_hz * 1.5)
-        cnt_hz = p->nominal_cnt_hz;
+    double cnt_hz = pps_ts_cnt_used(p, a->cnt_hz);
     uint32_t since = a->live_count - a->pps_count;
     a->gps_ns = last_pps_gps_ns() + (uint64_t)((double)since / cnt_hz * 1e9 + 0.5);
 }

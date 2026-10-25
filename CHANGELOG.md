@@ -18,11 +18,29 @@
   channel 1 at its latched polarity, whose boot default is HIGH on Pluto
   (`TDD_DEFAULT_POL 0b010`), so the RX-DMA OR stayed open until a capture had once
   restored the core. `configure_tdd` now latches channel 1 LOW first.
+- **Fixed: an ungated capture after a gated one never started.** The restore left
+  `axi_tdd` enabled without a sync — ARMED, every channel LOW — so the RX-DMA OR stayed
+  closed until a reboot. It now holds channel 1 HIGH as after boot (channel off, polarity
+  1, latched across `enable` 0 → 1), and `configure_tdd` disables the core before latching
+  channel 1 LOW, since writing `enable 1` to an enabled core latches nothing.
+- **Fixed: after a sample-rate change, captures used the old rate's counter.** For ~2 s
+  `PPS_DELTA` counts the old rate or a mix (25.72 M for 25.00 M). The start self-check
+  divided by it and flagged a correct 0.4 s capture `degraded` (−11 ms), and the
+  `l_clk` multiple was detected from it. Both now use `PPS_DELTA` only within 1000 ppm of
+  the nominal clock; the multiple falls back to the last one a settled count confirmed.
+  New `ctl:cnt_clk_settled` says which was used.
 - **Start self-check:** `ctl:start_check_ms` / `ctl:start_edge_latched` compare the latched
   edge with when the block finished, in raw counter ticks; a DMA that started early flags
   the capture `degraded`.
 - **Gated captures up to ~0.97 s** (was ~0.65 s): the window is the capture + 10 ms + 4096
-  samples (was 1.5× the capture). `t0_gps` must be more than the window + 20 ms ahead.
+  samples (was 1.5× the capture).
+- **The lead `t0_gps` needs no longer depends on the capture length.** The server now
+  retunes and programs the window before its fresh-PPS liveness wait, so that PPS anchors
+  the window. Programmed after it, the window started mid-second, and a 0.95 s capture
+  needed `t0_gps` more than 2 s ahead. Now: ≥ ~1.5 s ahead at an unchanged rate, plus up
+  to ~1.5 s when the rate changes (the AD9361 re-runs its RX analog-filter calibration:
+  30.72 → 5 MS/s took 1.5 s). A request that is too late is refused with how far ahead
+  it still was.
 - **One DMA block per capture.** libiio asks for four by default and the mmap path
   allocated as many full-size blocks as CMA held: a 118 MB capture took 231 MB and 690 ms
   to allocate, now 115 MB and 309 ms.
@@ -32,11 +50,13 @@
 - `S66ctld` raises the kernel DMA block cap to 128 MiB (`CTL_MAX_BLOCK`) unless the U-Boot
   env sets `iio_max_block_size`.
 - New metadata: `ctl:alloc_ms`, `ctl:max_block_size`, `ctl:arm_frame_pos`,
-  `ctl:start_check_ms`, `ctl:start_edge_latched`.
+  `ctl:start_check_ms`, `ctl:start_edge_latched`, `ctl:cnt_clk_settled`.
 - `ping` advertises `caps` (`held_arm`, `zero_copy`, `start_check`) and `max_block_size`,
   so a client can size and schedule captures for the build it is talking to.
-- Hardware-tested on a Pluto+ without a PPS (free-running frame; ungated captures to
-  0.96 s / 118 MB). Not yet run against a live PPS.
+- Hardware-tested on node1's Pluto+ with a live PPS: gated 0.04–0.95 s captures at 5,
+  12.5 and 30.72 MS/s, most requests retuning, with ungated captures in between — 36/36
+  latched their edge (`start_check_ms` +0.07 to +0.12, sample 0 within 0.1 µs of
+  `t0_gps`), none `degraded`.
 
 ## Unreleased — pps_counter: `tdd_armed`, explicit AXI interface
 
