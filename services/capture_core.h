@@ -55,6 +55,19 @@ void capture_release(capture_result_t *out);
 /* The kernel's DMA block cap in bytes (one capture must fit in one block), 0 if unknown. */
 long long capture_block_cap(void);
 
+/* The AD936x interface multiple (counter ticks per sample, 1-4) from the current rate and
+ * PPS_DELTA, accepted only when the count is settled (within 1000 ppm of a whole
+ * multiple); otherwise the last multiple confirmed, or 2. Shared by capture and stream. */
+int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta);
+
+/* The RX-DMA gate, for the stream (stream_core.c). capture_gate_hold: axi_tdd parked if it
+ * was running, then off with channel 1 latched LOW, so pps_counter's window owns the gate
+ * (0 ok, -1 no axi_tdd, -2 would not park). capture_gate_open: channel 1 held HIGH (as
+ * after boot) and pps_counter's window off -- free-running RX. */
+struct iio_context;
+int  capture_gate_hold(struct iio_context *ctx);
+void capture_gate_open(long long frame_len, long long rate_hz);
+
 #ifdef __cplusplus
 }
 #endif

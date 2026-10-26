@@ -6,9 +6,12 @@
 // Contract: docs/PLUTO_ZMQ_CTL_ICD.md (api "dsn.pluto_zmq.ctl/1"). The capture core
 // is capture_core.c (a refactor of the validated DSN/sdr-stack iq_capture.c).
 //
-// Two ops on one REP socket (strict REQ/REP lockstep -- EXACTLY one reply each):
+// Ops on one REP socket (strict REQ/REP lockstep -- EXACTLY one reply each):
 //   ping     -> 1 frame  {"pong":true,"api":"dsn.pluto_zmq.ctl/1",...,"caps":[...]}
 //   capture  -> 2 frames [meta-json, iq-bytes] on success; 1 frame {"error":...} on failure
+//   stream_start / stream_stop / stream_status -> 1 frame {"ok":...,"stream":{...}} or
+//            {"error":...}: a continuous GPS-timed stream to a receiver (stream_core.c,
+//            iqwire.h). While it runs the radio is the stream's, so capture is refused.
 // The client decides success purely by frame count, so on ANY failure send exactly
 // one frame, and on success exactly two.
 //
@@ -32,6 +35,7 @@
 #include <string>
 
 #include "capture_core.h"
+#include "stream_core.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_term(int) { g_stop = 1; }
@@ -128,12 +132,14 @@ static void send_error(void *sock, const std::string &msg) {
 //                t0_gps must lead by more than that window + 20 ms
 //   zero_copy    the IQ frame is sent straight from the DMA buffer
 //   start_check  ctl:start_check_ms / ctl:start_edge_latched in the meta
+//   stream       stream_start / stream_stop / stream_status (iqwire.h blocks, ZMQ PUSH)
 // max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
     char b[320];
     snprintf(b, sizeof b,
              "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
-             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\"],\"max_block_size\":%lld}",
+             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\"],"
+             "\"max_block_size\":%lld}",
              API, now_unix(), capture_block_cap());
     send_one(sock, b);
 }
@@ -191,6 +197,11 @@ static int g_unsent_fd[2] = {-1, -1};
 static void handle_capture(void *sock, const std::string &body) {
     capture_req_t req;
     memset(&req, 0, sizeof req);
+
+    if (stream_running()) {          // one radio owner: the stream has the AD9361
+        send_error(sock, "radio is streaming (stream_stop first)");
+        return;
+    }
 
     if (g_unsent_fd[0] >= 0) {
         if (!finish_send(&g_unsent, g_unsent_fd, 5000)) {
@@ -252,6 +263,74 @@ static void handle_capture(void *sock, const std::string &body) {
         g_unsent_fd[0] = pfd[0];
         g_unsent_fd[1] = pfd[1];
     }
+}
+
+// ---- stream dispatch -------------------------------------------------------
+
+// A receiver endpoint like tcp://192.168.50.20:5563 (kept to a safe character set).
+static bool endpoint_ok(const std::string &e) {
+    if (e.size() < 7 || e.size() >= sizeof(((stream_req_t *)0)->connect)) return false;
+    for (size_t i = 0; i < e.size(); ++i) {
+        char c = e[i];
+        if (!(isalnum((unsigned char)c) || c == ':' || c == '/' || c == '.' || c == '-' ||
+              c == '_' || c == '[' || c == ']')) return false;
+    }
+    return e.compare(0, 6, "tcp://") == 0;
+}
+
+static void send_stream(void *sock, bool ok, const char *status) {
+    std::string r = ok ? "{\"ok\":true" : "{\"ok\":false";
+    r += ",\"api\":\"";
+    r += API;
+    r += "\",\"stream\":";
+    r += status;
+    r += "}";
+    send_one(sock, r);
+}
+
+static void handle_stream(void *sock, void *zctx, const std::string &op, const std::string &body) {
+    char st[1024];
+    if (op == "stream_status") {
+        stream_status(st, sizeof st);
+        send_stream(sock, true, st);
+        return;
+    }
+    if (op == "stream_stop") {
+        int rc = stream_stop(st, sizeof st);
+        send_stream(sock, rc == 0, st);
+        return;
+    }
+    stream_req_t req;                   // stream_start
+    memset(&req, 0, sizeof req);
+    std::string ep = jstr(body, "connect");
+    if (!endpoint_ok(ep)) {
+        send_error(sock, "stream_start needs \"connect\": \"tcp://HOST:PORT\"");
+        return;
+    }
+    snprintf(req.connect, sizeof req.connect, "%s", ep.c_str());
+    double v;
+    if (!jnum(body, "freq_hz", &v))        { send_error(sock, "missing freq_hz"); return; }
+    req.freq_hz = (long long)v;
+    if (!jnum(body, "sample_rate_hz", &v)) { send_error(sock, "missing sample_rate_hz"); return; }
+    req.rate_hz = (long long)v;
+    if (jnum(body, "gain_db", &v)) { req.gain_db = v; req.have_gain = 1; }
+    req.channels = jnum(body, "channels", &v) ? (int)v : 1;
+    req.block_ms = jnum(body, "block_ms", &v) ? v : 100.0;
+    req.nblocks  = jnum(body, "blocks", &v) ? (int)v : 8;
+    if (g_unsent_fd[0] >= 0) {          // a capture reply's buffer still held by zmq
+        if (!finish_send(&g_unsent, g_unsent_fd, 5000)) {
+            send_error(sock, "previous capture's IQ is still being sent");
+            return;
+        }
+        g_unsent_fd[0] = g_unsent_fd[1] = -1;
+    }
+    char err[256] = "";
+    if (stream_start(zctx, &req, err, sizeof err) != 0) {
+        send_error(sock, std::string("stream_start: ") + err);
+        return;
+    }
+    stream_status(st, sizeof st);
+    send_stream(sock, true, st);
 }
 
 // ---- main ------------------------------------------------------------------
@@ -327,12 +406,18 @@ int main(int argc, char **argv) {
             send_ping(rep);
         } else if (op == "capture") {
             handle_capture(rep, body);
+        } else if (op == "stream_start" || op == "stream_stop" || op == "stream_status") {
+            handle_stream(rep, ctx, op, body);
         } else {
             send_error(rep, std::string("unknown op ") + op);
         }
     }
 
     fprintf(stderr, "pluto_ctld: shutting down\n");
+    if (stream_running()) {
+        char st[1024];
+        stream_stop(st, sizeof st);
+    }
     zmq_close(rep);
     zmq_ctx_term(ctx);
     return 0;

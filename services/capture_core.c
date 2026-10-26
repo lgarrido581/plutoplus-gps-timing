@@ -209,6 +209,24 @@ static long long max_block_bytes(void) {
 
 long long capture_block_cap(void) { return max_block_bytes(); }
 
+int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta) {
+    /* conservative Pluto+ fallback, or the last multiple a settled count confirmed */
+    int m = g_lclk_multiple ? g_lclk_multiple : 2;
+    if (pps_delta > 0 && cur_rate_hz > 0) {
+        long long r = ((long long)pps_delta + cur_rate_hz / 2) / cur_rate_hz;  /* round */
+        /* Only a settled count decides: within ~2 s of a rate change PPS_DELTA still
+         * counts the old rate, or a mix, and can round to the wrong multiple. */
+        double dev = (double)pps_delta - (double)(r * cur_rate_hz);
+        if (dev < 0.0) dev = -dev;
+        if (r >= 1 && r <= 4 && dev <= CNT_TOL * (double)(r * cur_rate_hz))
+            m = g_lclk_multiple = (int)r;
+    }
+    return m;
+}
+
+int  capture_gate_hold(struct iio_context *ctx) { return configure_tdd(ctx); }
+void capture_gate_open(long long frame_len, long long rate_hz) { restore_rx_mode(frame_len, rate_hz); }
+
 int capture_run(const capture_req_t *req, capture_result_t *out) {
     out->meta_json = NULL; out->iq = NULL; out->iq_len = 0; out->priv = NULL;
     out->err[0] = '\0';
@@ -237,20 +255,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     int have_pps = (pps_ts_init(&pps, LCLK_FALLBACK_HZ) == 0);
     long long cur_rate = 0;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur_rate);
-    /* conservative Pluto+ fallback, or the last multiple a settled count confirmed */
-    int lclk_multiple = g_lclk_multiple ? g_lclk_multiple : 2;
-    if (have_pps) {
-        uint32_t cnt = pps_ts_cnt_hz(&pps);
-        if (cnt > 0 && cur_rate > 0) {
-            long long r = ((long long)cnt + cur_rate / 2) / cur_rate;  /* round */
-            /* Only a settled count decides: within ~2 s of a rate change PPS_DELTA still
-             * counts the old rate, or a mix, and can round to the wrong multiple. */
-            double dev = (double)cnt - (double)(r * cur_rate);
-            if (dev < 0.0) dev = -dev;
-            if (r >= 1 && r <= 4 && dev <= CNT_TOL * (double)(r * cur_rate))
-                lclk_multiple = g_lclk_multiple = (int)r;
-        }
-    }
+    int lclk_multiple = capture_lclk_multiple(cur_rate, have_pps ? pps_ts_cnt_hz(&pps) : 0);
     double lclk_max = lclk_multiple > 2 ? LIBRE_LCLK_MAX_HZ : PLUTO_LCLK_MAX_HZ;
     double max_rate = lclk_max / (double)lclk_multiple;
     if (max_rate > 61440000.0) max_rate = 61440000.0; /* AD936x sample-rate limit */

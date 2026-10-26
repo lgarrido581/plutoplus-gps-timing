@@ -279,6 +279,74 @@ limitation, not a daemon bug, and it cannot be papered over server-side.
 - A wedge, if one is provoked anyway, **requires a reboot** (`ssh root@<pluto> reboot`) —
   a power-cycle is not needed, and disabling the `axi_tdd` core does not clear it.
 
+## 7b. Continuous stream — `stream_start` / `stream_stop` / `stream_status`
+
+Advertised by `"stream"` in `ping`'s `caps`. A stream sends RX0 (and RX1 with
+`channels: 2`, 2R2T mode) continuously to a receiver: one ZMQ PUSH message per DMA
+block, in the format of `services/iqwire.h`.
+- **Message:** a 64-byte header plus 24-byte markers, then the ci16 samples, sent
+  zero-copy.
+- **Receiver:** the host binds a PULL socket; the radio connects to it. The reference
+  receiver keeps the last N seconds in a shared-memory ring that readers query by GPS
+  time.
+
+While a stream runs, the radio is the stream's: `capture` answers
+`"radio is streaming (stream_stop first)"`. The stream also holds
+`/tmp/pluto_ctld.capturing` the whole time, so `xo_correct.sh` doesn't step the clocks
+under the DMA. The clock is therefore not disciplined while streaming; its rate is
+measured per second by the PPS markers instead.
+
+```json
+{"op":"stream_start","connect":"tcp://192.168.50.20:5563","freq_hz":94700000,
+ "sample_rate_hz":5000000,"gain_db":40,"channels":1,"block_ms":100,"blocks":8}
+```
+| field | default | meaning |
+|---|---|---|
+| `connect` | — | the receiver's `tcp://HOST:PORT` (required) |
+| `freq_hz`, `sample_rate_hz` | — | LO and per-channel rate (required) |
+| `gain_db` | AGC | manual RX gain; omitted ⇒ `slow_attack` |
+| `channels` | 1 | 1, or 2 (2R2T only) |
+| `block_ms` | 100 | DMA block length, 10–300 ms (rounded down to 1024 samples) |
+| `blocks` | 8 | kernel blocks queued, 2–32: how long the send may stall without loss |
+
+**Reply.** Once the first epoch's sample 0 has landed on its PPS edge, the reply is one
+frame, `{"ok":true,"api":...,"stream":{...status...}}`. If the stream can't start, it's
+one `{"error":...}` frame. The causes include: no live PPS, no receiver taking blocks,
+more than ~56 MB/s (`sample_rate_hz × channels × 4` past the Pluto+'s send ceiling), or a
+bad request. The reply takes up to the retune time plus ~1–2 s.
+
+`stream_stop` sends one more block, flagged `LAST`, then stops. It restores the gate as
+a capture leaves it (channel 1 HIGH, PPS window off) and answers with the final status.
+`stream_status` answers at any time.
+
+The status object holds:
+- **state:** `idle|arming|streaming|failed`;
+- **stream:** `connect`, `sample_rate_hz` and `center_freq_hz` as read back, `channels`,
+  `block_samples`, `blocks_queued`, `ticks_per_sample`;
+- **counters:** `epoch`, `epochs`, `epoch_t0_s`, `blocks`, `seconds`, `MBps`, `lag_ms`,
+  `max_lag_ms`, `xo_locked_at_start`;
+- **endings:** `ended` counts epochs by reason (`overflow`, `lag`, `send`, `refill`,
+  `arm`, `no_edge`), with the last `error`.
+
+**Epochs.** Sample 0 of an epoch is latched in hardware on a PPS edge (`epoch_t0_ns`,
+about +100 ns), as in a gated capture. The DMA then free-runs, and every later PPS edge
+rides along as a marker at its counter tick. The samples of an epoch are continuous.
+These end an epoch:
+- a DMA overflow;
+- a lag past the queue;
+- a refill error;
+- a send the receiver doesn't take (no receiver, or a stall over 30 s).
+
+A new epoch then starts on the next PPS edge, flagged `EPOCH_START` (plus `OVERFLOW` when
+samples were lost), so a gap is never hidden inside an epoch.
+
+**Measured on node1** (2026-10-25, 5 MS/s, 100 ms blocks, to the Jetson over GbE):
+- **Load:** `pluto_ctld` at ~17% CPU, the Jetson receiver at ~7% of a core.
+- **Clock:** 9,999,998 counts per GPS second (nominal).
+- **Edge read:** a window read at a PPS edge starts on the edge sample.
+
+Sustainable: ~12.5 MS/s on one channel (≈ 50 MB/s; the prototype's limit).
+
 ## 8. Security
 
 A **WRITE** interface (tunes + captures). On the trusted private hardware LAN, no auth

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — pluto_ctld: continuous GPS-timed stream
+
+- **`stream_start` / `stream_stop` / `stream_status`** (ICD §7b; `"stream"` in `caps`).
+  - **What it sends:** RX goes continuously to a receiver, one ZMQ PUSH message per DMA
+    block. Each message is the `services/iqwire.h` header (64 bytes plus 24-byte PPS,
+    GAIN and TX markers) followed by the ci16 samples, sent zero-copy.
+  - **Timing:** sample 0 of each epoch is latched on a PPS edge, and every later edge
+    becomes a marker at its counter tick, so the receiver can place any sample in GPS
+    time even with a drifting sample clock.
+  - **Loss:** an overflow, a lag past the queue or a refused send ends the epoch, and a
+    new one starts on the next edge. A gap never sits inside an epoch.
+  - **Coexistence:** `capture` is refused while streaming, and the xo lock is held.
+- From the `iq_stream` prototype (feat/iq-stream), now a thread in `pluto_ctld` (one
+  radio owner) with the binary header.
+- `capture_core` exports `capture_gate_hold/open` and `capture_lclk_multiple`, shared
+  with the stream.
+- CI installs `libzmq3-dev`, which `stream_core.c` needs.
+
 ## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
 
 Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
