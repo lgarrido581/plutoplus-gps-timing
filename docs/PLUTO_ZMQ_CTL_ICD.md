@@ -65,6 +65,8 @@ Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
     1.5× the capture, armed 0.35 s before `t0_gps`.
   - `zero_copy` — the IQ frame is sent straight from the DMA buffer.
   - `start_check` — `ctl:start_check_ms` / `ctl:start_edge_latched` are in the meta.
+  - `stream`, `tx` — §7b and §7c.
+  - `tdd_status` — §7d.
 - `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
   `samples × 4` must fit in it.
 
@@ -413,10 +415,43 @@ streaming at the same rate (45 MB/s at 12 MS/s).
 
 Between captures and streams, `pluto_ctld` now holds both channel 1 (RX) and channel 2
 (TX) HIGH. Another client driving the TDD core must relatch polarity 0 before using
-windows (`docs/GOTCHAS.md`).
+windows (`docs/GOTCHAS.md`). §7d shows what is latched.
 
 `tdoa/ctl_tx_test.py` runs the whole order against a receiver and checks the markers in
 the ring.
+
+## 7d. TDD gate state — `tdd_status`
+
+Advertised by `"tdd_status"` in `ping`'s `caps`. The axi_tdd core gates both DMAs:
+- channel 1 is the RX DMA's sync, ORed with pps_counter's PPS window;
+- channel 2 is the TX DMA's.
+
+**Finding the core.** On the Pluto+ it is IIO device `adi-iio-fakedev`, labeled
+`iio-axi-tdd-0` (iio:device5 on node1). pyadi's `tddn` looks for `axi-core-tdd`, the
+newer driver, which this firmware doesn't have. LibreSDR's TDD v2 is the platform device
+`7c440000.tdd`.
+
+**Why sysfs alone isn't enough.** A channel's `polarity` attribute is only the register.
+It reaches the output at the core's next `enable` 0 → 1 transition. While the channel is
+off, or the core is disabled, the channel drives the polarity latched then. So reading
+`out_channel1_polarity = 0` doesn't mean channel 1 is LOW.
+
+Request `tdd_status` (or `{"op":"tdd_status"}`). Reply, one frame:
+```json
+{"ok":true,"api":"dsn.pluto_zmq.ctl/1","tdd":{"found":true,
+ "sysfs":"/sys/bus/iio/devices/iio:device5","enable":1,"state":1,"burst_count":0,
+ "frame_length_raw":10000000,"latched_at":1793017745.120,
+ "channels":[{"enable":0,"polarity":0,"on_raw":0,"off_raw":0,"latched":0},
+             {"enable":0,"polarity":1,"on_raw":0,"off_raw":0,"latched":1},
+             {"enable":0,"polarity":1,"on_raw":0,"off_raw":0,"latched":1}]}}
+```
+- **Core:** `enable`, `state` (0 idle, 1 armed, 3 running), `burst_count` and
+  `frame_length_raw` as read from sysfs; −1 is an attribute that isn't there.
+- **Channels (0–2):** each has its registers, plus `latched`. That is the polarity at
+  `pluto_ctld`'s own last `enable` 0 → 1 (at `latched_at`), so what an off channel drives
+  now. −1 means none since `pluto_ctld` started.
+- **Other clients:** a client that toggles `enable` itself makes `latched` stale. The
+  example above is the idle state `pluto_ctld` leaves, with RX and TX gates both HIGH.
 
 ## 8. Security
 

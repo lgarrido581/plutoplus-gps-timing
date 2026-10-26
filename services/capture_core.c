@@ -45,6 +45,10 @@ static int g_lclk_multiple = 0;  /* last multiple a settled PPS_DELTA confirmed 
                                   * mode is fixed at boot); 0 = none yet */
 static long long g_rate_seen = 0;       /* the sample rate as last written or read */
 static double g_rate_since = -1e9;      /* CLOCK_MONOTONIC s when it took that value */
+static int g_latched[3] = { -1, -1, -1 }; /* axi_tdd channel polarities at this daemon's last
+                                          * enable 0 -> 1 (what a disabled or idle channel
+                                          * drives); -1 = none since start */
+static double g_latched_at = 0.0;       /* CLOCK_REALTIME s of that transition */
 
 static int sysfs_write(const char *name, long long value) {
     char path[256];
@@ -54,6 +58,52 @@ static int sysfs_write(const char *name, long long value) {
     int rc = fprintf(f, "%lld\n", value) < 0 ? -2 : 0;
     if (fclose(f) != 0 && rc == 0) rc = -3;
     return rc;
+}
+
+static long long sysfs_ll(const char *dir, const char *name) {
+    char path[320], b[64] = "";
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(b, sizeof b, f)) b[0] = '\0';
+    fclose(f);
+    return b[0] ? atoll(b) : -1;
+}
+
+/* The axi_tdd's sysfs directory: the IIO device labeled iio-axi-tdd-0 (its name is
+ * adi-iio-fakedev), else LibreSDR's TDD v2 platform device. Found once. */
+static const char *tdd_sysfs_dir(void) {
+    static char dir[96] = "";
+    if (dir[0]) return dir;
+    for (int i = 0; i < 16; i++) {
+        char path[96], b[64] = "";
+        snprintf(path, sizeof path, "/sys/bus/iio/devices/iio:device%d/label", i);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (!fgets(b, sizeof b, f)) b[0] = '\0';
+        fclose(f);
+        if (strncmp(b, "iio-axi-tdd-0", 13) == 0) {
+            snprintf(dir, sizeof dir, "/sys/bus/iio/devices/iio:device%d", i);
+            return dir;
+        }
+    }
+    if (access(TDD_V2_PATH "/enable", F_OK) == 0) snprintf(dir, sizeof dir, "%s", TDD_V2_PATH);
+    return dir;
+}
+
+/* Called right after each enable 0 -> 1 this daemon makes: the polarities then in the
+ * registers are what the channels now drive while off (or while the core is disabled). */
+static void note_latch(void) {
+    const char *d = tdd_sysfs_dir();
+    if (!d[0]) return;
+    for (int c = 0; c < 3; c++) {
+        char a[32];
+        snprintf(a, sizeof a, "out_channel%d_polarity", c);
+        g_latched[c] = (int)sysfs_ll(d, a);
+    }
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    g_latched_at = (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
 /* Coincident (PPS-anchored) capture. With sync_ext ALONE (CONTROL=0x9), ADI's axi_tdd re-syncs
@@ -106,6 +156,7 @@ static int configure_tdd(struct iio_context *ctx) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 0);
         sysfs_write("enable", 1);
+        note_latch();
         return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
     if (!g_tdd) return -1;
@@ -119,6 +170,7 @@ static int configure_tdd(struct iio_context *ctx) {
         iio_channel_attr_write(ch1, "polarity", "0");
         iio_channel_attr_write(ch1, "enable", "0");
         iio_device_attr_write(g_tdd, "enable", "1");
+        note_latch();
     }
     /* iio_device_attr_write returns the BYTE COUNT on success (not 0); the caller
      * checks != 0, so returning it raw read every success as failure. Normalize. */
@@ -139,6 +191,7 @@ static void restore_rx_mode(long long frame_len, long long rate) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 1);
         sysfs_write("enable", 1);
+        note_latch();
         pps_ts_disable_frame();
         return;
     }
@@ -159,6 +212,7 @@ static void restore_rx_mode(long long frame_len, long long rate) {
             iio_channel_attr_write(ch2, "polarity", "1");
         }
         iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
+        note_latch();
     }
     pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
 }
@@ -187,7 +241,33 @@ int capture_gate_tx_open(struct iio_context *ctx) {
     iio_device_attr_write(tdd, "enable", "0");
     iio_channel_attr_write(ch2, "enable", "0");
     iio_channel_attr_write(ch2, "polarity", "1");
-    return iio_device_attr_write(tdd, "enable", "1") < 0 ? -1 : 0;
+    int rc = iio_device_attr_write(tdd, "enable", "1") < 0 ? -1 : 0;
+    note_latch();
+    return rc;
+}
+
+void capture_tdd_status(char *json, size_t len) {
+    const char *d = tdd_sysfs_dir();
+    if (!d[0]) { snprintf(json, len, "{\"found\":false}"); return; }
+    char ch[3][160];
+    for (int c = 0; c < 3; c++) {
+        char a[4][32];
+        snprintf(a[0], sizeof a[0], "out_channel%d_enable", c);
+        snprintf(a[1], sizeof a[1], "out_channel%d_polarity", c);
+        snprintf(a[2], sizeof a[2], "out_channel%d_on_raw", c);
+        snprintf(a[3], sizeof a[3], "out_channel%d_off_raw", c);
+        snprintf(ch[c], sizeof ch[c],
+                 "{\"enable\":%lld,\"polarity\":%lld,\"on_raw\":%lld,\"off_raw\":%lld,"
+                 "\"latched\":%d}",
+                 sysfs_ll(d, a[0]), sysfs_ll(d, a[1]), sysfs_ll(d, a[2]), sysfs_ll(d, a[3]),
+                 g_latched[c]);
+    }
+    snprintf(json, len,
+             "{\"found\":true,\"sysfs\":\"%s\",\"enable\":%lld,\"state\":%lld,"
+             "\"burst_count\":%lld,\"frame_length_raw\":%lld,\"latched_at\":%.3f,"
+             "\"channels\":[%s,%s,%s]}",
+             d, sysfs_ll(d, "enable"), sysfs_ll(d, "state"), sysfs_ll(d, "burst_count"),
+             sysfs_ll(d, "frame_length_raw"), g_latched_at, ch[0], ch[1], ch[2]);
 }
 
 /* ISO8601 UTC with ns, e.g. 2026-06-23T18:04:05.123456789Z */

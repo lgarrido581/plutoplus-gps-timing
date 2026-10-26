@@ -47,6 +47,12 @@
 - `tx_status` reports `underflows`: status reads that found the TX DMA had run dry since
   the previous one. A dry cyclic DMA resumes late, which moves the waveform off its
   `TX_START` phase. It stayed 0 on node1 at 4 and 12 MS/s with RX streaming.
+- **`tdd_status`** (ICD §7d; `"tdd_status"` in `caps`): the axi_tdd core's registers and,
+  per channel, the polarity `pluto_ctld` last latched.
+  - A sysfs polarity is only the register; it reaches the output at the next enable
+    0 → 1. The radar had to guess the gate's state through pyadi.
+  - The core is IIO `adi-iio-fakedev`, labeled `iio-axi-tdd-0`, not pyadi's
+    `axi-core-tdd`.
 - **TX latency default by rate:** 68.5 − 2.375 per MS/s, clamped to 4–12 MS/s (59 at 4,
   50 at 8, 40 at 12), from the radar's direct-path measurements after the fix above.
   `latency_samples` still overrides it.

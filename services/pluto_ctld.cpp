@@ -12,6 +12,8 @@
 //   stream_start / stream_stop / stream_status -> 1 frame {"ok":...,"stream":{...}} or
 //            {"error":...}: a continuous GPS-timed stream to a receiver (stream_core.c,
 //            iqwire.h). While it runs the radio is the stream's, so capture is refused.
+//   tx_load (+ ci16 frame) / tx_start / tx_stop / tx_status -> 1 frame {"ok":...,"tx":{...}}
+//   tdd_status -> 1 frame {"ok":true,"tdd":{...}}: the axi_tdd gate (registers + latched)
 // The client decides success purely by frame count, so on ANY failure send exactly
 // one frame, and on success exactly two.
 //
@@ -136,15 +138,27 @@ static void send_error(void *sock, const std::string &msg) {
 //   stream       stream_start / stream_stop / stream_status (iqwire.h blocks, ZMQ PUSH)
 //   tx           tx_load (+ ci16 frame) / tx_start / tx_stop / tx_status: cyclic TX1, its
 //                start marked in a running stream (iqwire TX_START / TX_HASH)
+//   tdd_status   the axi_tdd gate's registers and what this daemon last latched
 // max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
     char b[320];
     snprintf(b, sizeof b,
              "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
-             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\",\"tx\"],"
-             "\"max_block_size\":%lld}",
+             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\",\"tx\","
+             "\"tdd_status\"],\"max_block_size\":%lld}",
              API, now_unix(), capture_block_cap());
     send_one(sock, b);
+}
+
+static void send_tdd_status(void *sock) {
+    char st[1024];
+    capture_tdd_status(st, sizeof st);
+    std::string r = "{\"ok\":true,\"api\":\"";
+    r += API;
+    r += "\",\"tdd\":";
+    r += st;
+    r += "}";
+    send_one(sock, r);
 }
 
 // ---- capture dispatch ------------------------------------------------------
@@ -475,6 +489,8 @@ int main(int argc, char **argv) {
 
         if (op == "ping") {
             send_ping(rep);
+        } else if (op == "tdd_status") {
+            send_tdd_status(rep);
         } else if (op == "capture") {
             handle_capture(rep, body);
         } else if (op == "stream_start" || op == "stream_stop" || op == "stream_status") {

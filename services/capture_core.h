@@ -93,6 +93,13 @@ void capture_gate_open(long long frame_len, long long rate_hz);
  * the core's enable. */
 int  capture_gate_tx_open(struct iio_context *ctx);
 
+/* axi_tdd as JSON, read from sysfs: enable, state (0 idle, 1 armed, 3 running), the frame,
+ * and per channel (0..2) its enable/polarity/on/off registers plus `latched`, the polarity
+ * at this daemon's last enable 0 -> 1 (-1: none since start). A register written since
+ * reaches the output only at the next transition. Channel 1 is the RX DMA's sync (ORed
+ * with pps_counter's window), channel 2 the TX DMA's. */
+void capture_tdd_status(char *json, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
