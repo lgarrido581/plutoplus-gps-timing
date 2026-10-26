@@ -40,7 +40,8 @@
 #define XO_STATE    "/run/xo_state"
 #define MAX_MARKERS 8
 #define SEND_CEILING_BPS 56e6      /* measured: the Pluto+'s GbE send tops out near 57 MB/s */
-#define SEND_HOLD_MS 30000         /* how long zmq may hold a block before we give up */
+#define SEND_STALL_MS 5000         /* a block not sent this long ends the epoch */
+#define SEND_HOLD_MS 30000         /* how long teardown waits for zmq to let go of a block */
 
 enum { ST_IDLE, ST_ARMING, ST_STREAMING, ST_FAILED };
 static const char *STATE_NAME[] = { "idle", "arming", "streaming", "failed" };
@@ -200,9 +201,13 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
     if (s->n_blk < 1024) { snprintf(err, el, "block_ms too short for this rate"); return -1; }
 
     s->push = zmq_socket(g.zctx, ZMQ_PUSH);
-    int linger = 0, hwm = 2;
+    int linger = 0, hwm = 2, immediate = 1;
     zmq_setsockopt(s->push, ZMQ_LINGER, &linger, sizeof linger);
     zmq_setsockopt(s->push, ZMQ_SNDHWM, &hwm, sizeof hwm);
+    /* queue only to a connected receiver: with none (or once it is gone) a send fails at
+     * once and the epoch ends, instead of a block waiting in zmq for a reconnect while
+     * the DMA runs out of queue */
+    zmq_setsockopt(s->push, ZMQ_IMMEDIATE, &immediate, sizeof immediate);
     if (zmq_connect(s->push, r->connect) != 0) {
         snprintf(err, el, "zmq connect %s: %s", r->connect, zmq_strerror(zmq_errno()));
         return -1;
@@ -389,8 +394,8 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         s->held = 1;
         int sent = zmq_msg_send(&m, s->push, ZMQ_DONTWAIT) >= 0;
         if (!sent) zmq_msg_close(&m);                                  /* -> block_sent */
-        if (!wait_released(s, SEND_HOLD_MS)) {
-            snprintf(err, el, "receiver at %s stalled %d s", r->connect, SEND_HOLD_MS / 1000);
+        if (!wait_released(s, SEND_STALL_MS)) {
+            snprintf(err, el, "receiver at %s stalled %d s", r->connect, SEND_STALL_MS / 1000);
             end = END_SEND;
             break;
         }
@@ -449,7 +454,9 @@ static void *run(void *arg) {
             if (started) { epoch++; ever = 1; tries = 0; }
             if (end == END_STOP) break;
             if (!ever) { failed = 1; break; }          /* stream_start reports it */
-            if (!started && ++tries >= 10) { failed = 1; break; }
+            /* a missing receiver may come back: keep trying until stream_stop. The radio
+             * failing to arm ten times running is a hardware problem: give up. */
+            if (!started && end != END_SEND && ++tries >= 10) { failed = 1; break; }
             if (end == END_SEND || end == END_ARM || end == END_NOEDGE) usleep(1000000);
             set_state(ST_ARMING, NULL);
             fprintf(stderr, "pluto_ctld: stream: epoch ended (%s): %s; re-arming\n",
