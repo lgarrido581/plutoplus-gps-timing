@@ -29,6 +29,7 @@ static struct {
     uint64_t            hash;
     int                 running;
     uint32_t            live0, live1;
+    int                 latency;   /* samples from the push's end to TX sample 0 at RX */
     unsigned            gen;
     char                ensm_was[32];
 } T = { .mu = PTHREAD_MUTEX_INITIALIZER };
@@ -117,6 +118,7 @@ int tx_load(const tx_req_t *req, const void *iq, size_t bytes, char *err, size_t
     T.rate_hz = fs;
     T.freq_hz = fc;
     T.gain_db = req->gain_db;
+    T.latency = req->latency_samples >= 0 ? req->latency_samples : TX_LATENCY_SAMPLES;
     T.hash = fnv1a64(iq, bytes);
     T.running = 0;
     pthread_mutex_unlock(&T.mu);
@@ -151,10 +153,11 @@ void tx_status(char *json, size_t len) {
     snprintf(json, len,
         "{\"loaded\":%s,\"running\":%s,\"samples\":%zu,\"sample_rate_hz\":%lld,"
         "\"freq_hz\":%lld,\"gain_db\":%.2f,\"hash\":\"0x%016llx\",\"starts\":%u,"
-        "\"start_live\":%u,\"start_window_counts\":%u,\"ensm_was\":\"%s\"}",
+        "\"start_live_after\":%u,\"start_window_counts\":%u,\"latency_samples\":%d,"
+        "\"ensm_was\":\"%s\"}",
         T.buf ? "true" : "false", T.running ? "true" : "false", T.nsamp, T.rate_hz,
-        T.freq_hz, T.gain_db, (unsigned long long)T.hash, T.gen, T.live0,
-        (uint32_t)(T.live1 - T.live0), T.ensm_was[0] ? T.ensm_was : "unknown");
+        T.freq_hz, T.gain_db, (unsigned long long)T.hash, T.gen, T.live1,
+        (uint32_t)(T.live1 - T.live0), T.latency, T.ensm_was[0] ? T.ensm_was : "unknown");
     pthread_mutex_unlock(&T.mu);
 }
 
@@ -181,13 +184,13 @@ long long tx_rate(void) {
     return r;
 }
 
-int tx_start_info(uint32_t *live_before, uint32_t *live_after, uint64_t *len,
+int tx_start_info(uint32_t *live_after, int *latency_samples, uint64_t *len,
                   uint64_t *hash, unsigned *gen) {
     pthread_mutex_lock(&T.mu);
     int r = T.running;
     if (r) {
-        *live_before = T.live0;
         *live_after = T.live1;
+        *latency_samples = T.latency;
         *len = T.nsamp;
         *hash = T.hash;
         *gen = T.gen;

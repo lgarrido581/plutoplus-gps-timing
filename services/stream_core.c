@@ -381,15 +381,17 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         }
         /* cyclic TX: where its sample 0 went out (a new tx_start), restated at the first
          * period boundary of every new epoch, so a reader can cut sweeps from any epoch */
-        uint32_t tl0, tl1;
+        uint32_t tl1;
+        int tlat;
         uint64_t tlen, thash;
         unsigned tgen;
         int emit_tx = 0;
-        if (!tx_start_info(&tl0, &tl1, &tlen, &thash, &tgen)) {
+        if (!tx_start_info(&tl1, &tlat, &tlen, &thash, &tgen)) {
             s->tx_known = 0;
         } else if (!s->tx_known || tgen != s->tx_gen) {
-            uint32_t mid = tl0 + (uint32_t)(tl1 - tl0) / 2;   /* the push's midpoint */
-            uint32_t ago = live - mid;
+            /* the DMA starts at the END of the push; TX sample 0 reaches the RX samples
+             * a fixed latency later (measured with the direct path, tx_core.h) */
+            uint32_t ago = live - tl1;
             s->tx_gen = tgen;
             s->tx_len = tlen;
             s->tx_hash = thash;
@@ -397,7 +399,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
              * be placed with a 32-bit counter: leave it to the reader's own sync */
             s->tx_known = ago < 0x80000000u;
             if (s->tx_known) {
-                s->tx_tick = (int64_t)cnt64 - (int64_t)ago;
+                s->tx_tick = (int64_t)cnt64 - (int64_t)ago + (int64_t)tlat * mult;
                 emit_tx = 1;
             }
         } else if (k == 0) {

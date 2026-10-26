@@ -392,6 +392,7 @@ static void handle_tx(void *sock, const std::string &op, const std::string &body
     req.rate_hz = (long long)v;
     req.gain_db = jnum(body, "gain_db", &v) ? v : -10.0;
     req.bandwidth_hz = jnum(body, "bandwidth_hz", &v) ? (long long)v : 0;
+    req.latency_samples = jnum(body, "latency_samples", &v) ? (int)v : -1;
     if (tx_load(&req, payload.data(), payload.size(), err, sizeof err) != 0) {
         send_error(sock, std::string("tx_load: ") + err);
         return;

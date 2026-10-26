@@ -358,7 +358,7 @@ one radar CPI of whole sweeps. The order:
 3. **`tx_start`:** starts the loaded buffer.
 
 `tx_load` is a two-frame request. Frame 0 is
-`{"op":"tx_load","freq_hz":2.4e9,"sample_rate_hz":4e6,"gain_db":-10,"bandwidth_hz":0}`.
+`{"op":"tx_load","freq_hz":2.4e9,"sample_rate_hz":4e6,"gain_db":-10,"bandwidth_hz":0,"latency_samples":55}`.
 Frame 1 is the ci16 I/Q of one period: at least 64 samples, a whole number of sweeps,
 full scale ±32767 (the DAC takes the top 12 bits).
 - **Defaults:** `gain_db` is TX1's attenuation, −89.75 to 0, default −10;
@@ -372,13 +372,19 @@ full scale ±32767 (the DAC takes the top 12 bits).
 
 `tx_start` pushes the buffer, which plays until `tx_stop`. pluto_ctld reads the
 pps_counter just before and after the push. With a stream running, the next block carries:
-- **`TX_START`:** at the push's midpoint tick, with value = buffer length in samples.
-  Sweep boundaries are tick + k·len·ticks_per_sample.
+- **`TX_START`:** at the tick where TX sample 0 reaches the RX samples, with value =
+  buffer length in samples. Sweep boundaries are tick + k·len·ticks_per_sample.
+  - **Placement:** the DMA starts at the end of the push, so the tick is the after-push
+    reading plus `latency_samples` (default 55).
+  - **Calibration:** measured with the radar's direct path on node1 at 4 MS/s (+59, +59,
+    +52 samples after the push's end over three starts). `tx_load` can override the
+    constant per rate.
 - **`TX_HASH`:** at the same tick, with value = the hash.
 
 Every later epoch restates both at its first period boundary, so the phase is known in
-any epoch. The marker is exact to the push's window (`start_window_counts` in
-`tx_status`) plus a fixed DAC latency; check it against the direct path.
+any epoch. The marker is good to about ±4 samples at 4 MS/s; a direct-path matched
+filter can refine it. `tx_status` reports `start_window_counts` (the push's length)
+and `latency_samples`.
 
 A TX started before the stream is placed only if it started less than 2^31 counter ticks
 earlier (~3.5 min at 5 MS/s).
