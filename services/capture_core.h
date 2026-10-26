@@ -65,7 +65,13 @@ int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta);
  * (0 ok, -1 no axi_tdd, -2 would not park). capture_gate_open: channel 1 held HIGH (as
  * after boot) and pps_counter's window off -- free-running RX. */
 struct iio_context;
+struct iio_device;
 int  capture_gate_hold(struct iio_context *ctx);
+
+/* Put the AD9361 (ad9361-phy) in FDD if it is not: in ALERT, left there by another
+ * libiio client, the DMA fills with a constant DC level at the wrong rate. `was` gets
+ * the state found ("fdd", "alert", ...). 0 = FDD now, -1 = the write failed. */
+int  capture_assert_fdd(struct iio_device *phy, char *was, size_t len);
 void capture_gate_open(long long frame_len, long long rate_hz);
 
 #ifdef __cplusplus

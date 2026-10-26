@@ -61,6 +61,7 @@ typedef struct {
     char            err[200];
     double          fs, fc, t_start, lag_s, max_lag_s;
     int             mult, xo_locked, block_samples;
+    char            ensm_was[32];     /* the AD9361 state found at start (fdd expected) */
     unsigned        epoch;
     long long       epoch_sec;
     unsigned long long epochs, blocks, samples, bytes, ends[N_END];
@@ -187,6 +188,10 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
         }
     }
     iio_channel_attr_write_longlong(p_lo, "frequency", r->freq_hz);
+    char ensm_was[32];
+    capture_assert_fdd(phy, ensm_was, sizeof ensm_was);
+    if (strcmp(ensm_was, "fdd") != 0)
+        fprintf(stderr, "pluto_ctld: stream: ensm_mode was %s -- set fdd\n", ensm_was);
     long long fs = r->rate_hz, fc = r->freq_hz;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &fs);
     iio_channel_attr_read_longlong(p_lo, "frequency", &fc);
@@ -219,6 +224,7 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
     pthread_mutex_lock(&g.mu);
     g.fs = (double)fs; g.fc = (double)fc; g.mult = mult; g.block_samples = (int)s->n_blk;
     g.xo_locked = xo_locked();
+    snprintf(g.ensm_was, sizeof g.ensm_was, "%s", ensm_was);
     pthread_mutex_unlock(&g.mu);
     if (!g.xo_locked)
         fprintf(stderr, "pluto_ctld: stream: WARNING %s is not LOCKED -- timing is unreliable "
@@ -556,12 +562,14 @@ void stream_status(char *json, size_t len) {
         "\"channels\":%d,\"block_samples\":%d,\"blocks_queued\":%d,\"ticks_per_sample\":%d,"
         "\"epoch\":%u,\"epochs\":%llu,\"epoch_t0_s\":%lld,\"blocks\":%llu,\"seconds\":%.3f,"
         "\"MBps\":%.2f,\"lag_ms\":%.1f,\"max_lag_ms\":%.1f,\"xo_locked_at_start\":%s,"
+        "\"ensm_was\":\"%s\","
         "\"ended\":{\"overflow\":%llu,\"lag\":%llu,\"send\":%llu,\"refill\":%llu,\"arm\":%llu,"
         "\"no_edge\":%llu},\"error\":\"%s\"}",
         STATE_NAME[g.state], c, g.fs, g.fc, g.req.channels, g.block_samples,
         g.req.nblocks, g.mult, g.epoch, g.epochs, g.epoch_sec, g.blocks, secs,
         up > 0 ? (double)g.bytes / up / 1e6 : 0.0, g.lag_s * 1e3, g.max_lag_s * 1e3,
-        g.xo_locked ? "true" : "false", g.ends[END_OVERFLOW], g.ends[END_LAG],
+        g.xo_locked ? "true" : "false", g.ensm_was[0] ? g.ensm_was : "unknown",
+        g.ends[END_OVERFLOW], g.ends[END_LAG],
         g.ends[END_SEND], g.ends[END_REFILL], g.ends[END_ARM], g.ends[END_NOEDGE], e);
     pthread_mutex_unlock(&g.mu);
 }

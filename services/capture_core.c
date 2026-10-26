@@ -224,6 +224,18 @@ int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta) {
     return m;
 }
 
+int capture_assert_fdd(struct iio_device *phy, char *was, size_t len) {
+    /* The receiver only produces data in FDD. Another libiio client can leave the chip in
+     * ALERT; the DMA then fills with a constant DC level, at the wrong rate (seen on node1,
+     * 2026-10-26: every gated capture "finished 19.9 ms early" for an hour). */
+    char cur[32] = "";
+    if (iio_device_attr_read(phy, "ensm_mode", cur, sizeof cur) <= 0) cur[0] = '\0';
+    for (char *p = cur; *p; p++) if (*p == '\n' || *p == '\r') *p = '\0';
+    if (was && len) snprintf(was, len, "%s", cur[0] ? cur : "unknown");
+    if (strcmp(cur, "fdd") == 0) return 0;
+    return iio_device_attr_write(phy, "ensm_mode", "fdd") < 0 ? -1 : 0;
+}
+
 int  capture_gate_hold(struct iio_context *ctx) { return configure_tdd(ctx); }
 void capture_gate_open(long long frame_len, long long rate_hz) { restore_rx_mode(frame_len, rate_hz); }
 
@@ -308,6 +320,10 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         iio_channel_attr_write(p_rx, "gain_control_mode", "slow_attack");
     }
     iio_channel_attr_write_longlong(p_lo, "frequency", req->freq_hz);
+    char ensm_was[32];
+    capture_assert_fdd(phy, ensm_was, sizeof ensm_was);
+    if (strcmp(ensm_was, "fdd") != 0)
+        fprintf(stderr, "pluto_ctld: ensm_mode was %s -- set fdd\n", ensm_was);
 
     /* core:frequency MUST be the ACTUAL chip LO read back (the AD9361 silently clamps
      * an out-of-range LO and holds its old value); DSN trusts this over the request. */
@@ -693,6 +709,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"ctl:arm_frame_pos\": %u,\n"
       "      \"ctl:start_check_ms\": %.3f,\n"
       "      \"ctl:cnt_clk_settled\": %s,\n"
+      "      \"ctl:ensm_was\": \"%s\",\n"
       "      \"ctl:start_edge_latched\": %s\n"
       "    }\n"
       "  ],\n"
@@ -706,6 +723,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       dbg_lc, dbg_lseq, dbg_lseq_prev, (unsigned long long)dbg_lgps,
       dbg_ppsc, (long)dbg_latch_off, alloc_ms, block_cap, arm_pos, start_check_ms,
       pps_ts_cnt_used(&pps, anchor.cnt_hz) == (double)anchor.cnt_hz ? "true" : "false",
+      ensm_was,
       no_start_edge ? "false" : "true");
 
     /* Zero-copy: hand out the IQ where the DMA put it. The block stays ours until
