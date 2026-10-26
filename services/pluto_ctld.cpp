@@ -36,6 +36,7 @@
 
 #include "capture_core.h"
 #include "stream_core.h"
+#include "tx_core.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_term(int) { g_stop = 1; }
@@ -133,12 +134,14 @@ static void send_error(void *sock, const std::string &msg) {
 //   zero_copy    the IQ frame is sent straight from the DMA buffer
 //   start_check  ctl:start_check_ms / ctl:start_edge_latched in the meta
 //   stream       stream_start / stream_stop / stream_status (iqwire.h blocks, ZMQ PUSH)
+//   tx           tx_load (+ ci16 frame) / tx_start / tx_stop / tx_status: cyclic TX1, its
+//                start marked in a running stream (iqwire TX_START / TX_HASH)
 // max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
     char b[320];
     snprintf(b, sizeof b,
              "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
-             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\"],"
+             "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\",\"tx\"],"
              "\"max_block_size\":%lld}",
              API, now_unix(), capture_block_cap());
     send_one(sock, b);
@@ -317,6 +320,13 @@ static void handle_stream(void *sock, void *zctx, const std::string &op, const s
     req.channels = jnum(body, "channels", &v) ? (int)v : 1;
     req.block_ms = jnum(body, "block_ms", &v) ? v : 100.0;
     req.nblocks  = jnum(body, "blocks", &v) ? (int)v : 8;
+    long long txr = tx_rate();
+    if (txr > 0 && (txr > req.rate_hz + 2 || txr < req.rate_hz - 2)) {   // RX and TX share the rate
+        char m[160];
+        snprintf(m, sizeof m, "TX is loaded at %lld S/s: stream at the same rate (or tx_stop first)", txr);
+        send_error(sock, m);
+        return;
+    }
     if (g_unsent_fd[0] >= 0) {          // a capture reply's buffer still held by zmq
         if (!finish_send(&g_unsent, g_unsent_fd, 5000)) {
             send_error(sock, "previous capture's IQ is still being sent");
@@ -331,6 +341,63 @@ static void handle_stream(void *sock, void *zctx, const std::string &op, const s
     }
     stream_status(st, sizeof st);
     send_stream(sock, true, st);
+}
+
+// ---- tx dispatch -------------------------------------------------------------
+
+static void send_tx(void *sock, bool ok, const char *status) {
+    std::string r = ok ? "{\"ok\":true" : "{\"ok\":false";
+    r += ",\"api\":\"";
+    r += API;
+    r += "\",\"tx\":";
+    r += status;
+    r += "}";
+    send_one(sock, r);
+}
+
+static void handle_tx(void *sock, const std::string &op, const std::string &body,
+                      const std::string &payload) {
+    char st[512], err[256] = "";
+    if (op == "tx_status") {
+        tx_status(st, sizeof st);
+        send_tx(sock, true, st);
+        return;
+    }
+    if (op == "tx_stop") {
+        int rc = tx_stop(st, sizeof st);
+        send_tx(sock, rc == 0, st);
+        return;
+    }
+    if (op == "tx_start") {
+        if (tx_start(err, sizeof err) != 0) { send_error(sock, std::string("tx_start: ") + err); return; }
+        tx_status(st, sizeof st);
+        send_tx(sock, true, st);
+        return;
+    }
+    // tx_load: frame 0 = this JSON, frame 1 = ci16 I/Q (one cyclic period)
+    if (stream_running()) {          // TX tuning can disturb a running RX stream
+        send_error(sock, "tx_load while streaming: load TX first, then stream_start, then tx_start");
+        return;
+    }
+    if (g_unsent_fd[0] >= 0) {
+        send_error(sock, "previous capture's IQ is still being sent");
+        return;
+    }
+    tx_req_t req;
+    memset(&req, 0, sizeof req);
+    double v;
+    if (!jnum(body, "freq_hz", &v))        { send_error(sock, "missing freq_hz"); return; }
+    req.freq_hz = (long long)v;
+    if (!jnum(body, "sample_rate_hz", &v)) { send_error(sock, "missing sample_rate_hz"); return; }
+    req.rate_hz = (long long)v;
+    req.gain_db = jnum(body, "gain_db", &v) ? v : -10.0;
+    req.bandwidth_hz = jnum(body, "bandwidth_hz", &v) ? (long long)v : 0;
+    if (tx_load(&req, payload.data(), payload.size(), err, sizeof err) != 0) {
+        send_error(sock, std::string("tx_load: ") + err);
+        return;
+    }
+    tx_status(st, sizeof st);
+    send_tx(sock, true, st);
 }
 
 // ---- main ------------------------------------------------------------------
@@ -380,13 +447,16 @@ int main(int argc, char **argv) {
         std::string raw((char *)zmq_msg_data(&m), zmq_msg_size(&m));
         zmq_msg_close(&m);
 
-        // Drain any extra request frames (the client sends single-frame requests;
-        // be robust so a stray multipart can't desync the REP socket).
-        int more = 0;
+        // Extra request frames: tx_load's samples ride in the second; any further are
+        // drained so a stray multipart can't desync the REP socket.
+        std::string payload;
+        int more = 0, nextra = 0;
         size_t mlen = sizeof more;
         while (zmq_getsockopt(rep, ZMQ_RCVMORE, &more, &mlen) == 0 && more) {
             zmq_msg_t extra; zmq_msg_init(&extra);
             if (zmq_msg_recv(&extra, rep, 0) < 0) { zmq_msg_close(&extra); break; }
+            if (nextra++ == 0)
+                payload.assign((const char *)zmq_msg_data(&extra), zmq_msg_size(&extra));
             zmq_msg_close(&extra);
         }
 
@@ -408,6 +478,8 @@ int main(int argc, char **argv) {
             handle_capture(rep, body);
         } else if (op == "stream_start" || op == "stream_stop" || op == "stream_status") {
             handle_stream(rep, ctx, op, body);
+        } else if (op == "tx_load" || op == "tx_start" || op == "tx_stop" || op == "tx_status") {
+            handle_tx(rep, op, body, payload);
         } else {
             send_error(rep, std::string("unknown op ") + op);
         }
@@ -417,6 +489,10 @@ int main(int argc, char **argv) {
     if (stream_running()) {
         char st[1024];
         stream_stop(st, sizeof st);
+    }
+    if (tx_loaded()) {
+        char st[512];
+        tx_stop(st, sizeof st);
     }
     zmq_close(rep);
     zmq_ctx_term(ctx);

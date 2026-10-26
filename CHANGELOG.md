@@ -17,6 +17,17 @@
 - `capture_core` exports `capture_gate_hold/open` and `capture_lclk_multiple`, shared
   with the stream.
 - CI installs `libzmq3-dev`, which `stream_core.c` needs.
+- **`tx_load` / `tx_start` / `tx_stop` / `tx_status`** (ICD §7c; `"tx"` in `caps`):
+  cyclic TX1 for the radar.
+  - **Order:** load, then `stream_start` at the same rate, then start.
+  - **Markers:** the start appears in the stream as `TX_START` (tick, buffer length) and
+    `TX_HASH`, restated at the first period boundary of every epoch.
+  - **Gate:** axi_tdd channel 2, the TX DMA's gate (arm-only sync), is held HIGH like
+    channel 1, so a cyclic buffer never starves.
+- **The AD9361 is put in FDD after every tune** (capture, stream, TX).
+  - **Incident:** another libiio client had left it in ALERT on node1, and every gated
+    capture came back at twice the rate, as constant DC ("finished 19.9 ms early").
+  - **Reported:** `ctl:ensm_was` in the meta, `ensm_was` in stream and TX status.
 
 ## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
 

@@ -356,7 +356,7 @@ fi
 if [ -n "$BR_CFG" ] && [ -f /build/services-src/pluto_ctld.cpp ]; then
     PKG=buildroot/package/pluto-ctld
     mkdir -p "$PKG"
-    for f in pluto_ctld.cpp capture_core.c capture_core.h pps_timestamp.c pps_timestamp.h stream_core.c stream_core.h iqwire.h S66ctld; do
+    for f in pluto_ctld.cpp capture_core.c capture_core.h pps_timestamp.c pps_timestamp.h stream_core.c stream_core.h tx_core.c tx_core.h iqwire.h S66ctld; do
         cp "/build/services-src/$f" "$PKG/$f"
     done
     cat > "$PKG/Config.in" << 'EOF'
@@ -385,9 +385,10 @@ define PLUTO_CTLD_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -O2 -I$(@D) -c $(@D)/pps_timestamp.c -o $(@D)/pps_timestamp.o
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -O2 -I$(@D) -c $(@D)/capture_core.c -o $(@D)/capture_core.o
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -O2 -I$(@D) -c $(@D)/stream_core.c -o $(@D)/stream_core.o
+	$(TARGET_CC) $(TARGET_CFLAGS) -std=gnu11 -O2 -I$(@D) -c $(@D)/tx_core.c -o $(@D)/tx_core.o
 	$(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++11 -O2 -I$(@D) -c $(@D)/pluto_ctld.cpp -o $(@D)/pluto_ctld.o
 	$(TARGET_CXX) $(TARGET_CXXFLAGS) -pthread -o $(@D)/pluto_ctld \
-		$(@D)/pluto_ctld.o $(@D)/capture_core.o $(@D)/pps_timestamp.o $(@D)/stream_core.o -lzmq -liio -lm
+		$(@D)/pluto_ctld.o $(@D)/capture_core.o $(@D)/pps_timestamp.o $(@D)/stream_core.o $(@D)/tx_core.o -lzmq -liio -lm
 endef
 
 define PLUTO_CTLD_INSTALL_TARGET_CMDS

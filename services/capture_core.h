@@ -74,6 +74,11 @@ int  capture_gate_hold(struct iio_context *ctx);
 int  capture_assert_fdd(struct iio_device *phy, char *was, size_t len);
 void capture_gate_open(long long frame_len, long long rate_hz);
 
+/* Hold axi_tdd channel2 (the TX DMA's gate) HIGH, leaving channel1 as it is. 0 ok,
+ * -1 no axi_tdd, -2 a running core would not park. Not while a stream runs: it toggles
+ * the core's enable. */
+int  capture_gate_tx_open(struct iio_context *ctx);
+
 #ifdef __cplusplus
 }
 #endif

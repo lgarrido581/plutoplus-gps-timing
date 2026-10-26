@@ -16,6 +16,7 @@
 #include "capture_core.h"
 #include "iqwire.h"
 #include "pps_timestamp.h"
+#include "tx_core.h"
 
 #include <errno.h>
 #include <iio.h>
@@ -81,6 +82,15 @@ typedef struct {
     struct iio_buffer  *buf;
     int                 held;      /* zmq still owns a block of buf */
     int64_t             gain_mdb;  /* -1 = AGC */
+    /* cyclic TX (tx_core): where its sample 0 went out, in ticks from this epoch's
+     * sample 0 (negative: before it), carried across epochs */
+    int                 tx_known;
+    unsigned            tx_gen;
+    int64_t             tx_tick;
+    uint64_t            tx_len, tx_hash;
+    int                 have_last;
+    uint32_t            last_live;    /* LIVE and ticks-since-sample-0 at the last block */
+    uint64_t            last_cnt64;
 } sess_t;
 
 static double realtime_s(void) {
@@ -340,6 +350,8 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
             pseq_prev = pseq;
             live_prev = lc;
             ovf = 0;      /* the ADC overflowed while the DMA waited for the edge: expected */
+            if (s->tx_known && s->have_last)   /* re-base TX's start on this epoch's sample 0 */
+                s->tx_tick -= (int64_t)(s->last_cnt64 + (uint32_t)(lc - s->last_live));
         }
         cnt64 += (uint32_t)(live - live_prev);
         live_prev = live;
@@ -366,6 +378,39 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
             mk[nm].kind = IQW_M_PPS;
             nm++;
             pseq_prev = pseq;
+        }
+        /* cyclic TX: where its sample 0 went out (a new tx_start), restated at the first
+         * period boundary of every new epoch, so a reader can cut sweeps from any epoch */
+        uint32_t tl0, tl1;
+        uint64_t tlen, thash;
+        unsigned tgen;
+        int emit_tx = 0;
+        if (!tx_start_info(&tl0, &tl1, &tlen, &thash, &tgen)) {
+            s->tx_known = 0;
+        } else if (!s->tx_known || tgen != s->tx_gen) {
+            uint32_t mid = tl0 + (uint32_t)(tl1 - tl0) / 2;   /* the push's midpoint */
+            uint32_t ago = live - mid;
+            s->tx_gen = tgen;
+            s->tx_len = tlen;
+            s->tx_hash = thash;
+            /* a start more than 2^31 counts ago (TX started long before this stream) can't
+             * be placed with a 32-bit counter: leave it to the reader's own sync */
+            s->tx_known = ago < 0x80000000u;
+            if (s->tx_known) {
+                s->tx_tick = (int64_t)cnt64 - (int64_t)ago;
+                emit_tx = 1;
+            }
+        } else if (k == 0) {
+            emit_tx = 1;
+        }
+        if (emit_tx && s->tx_len > 0) {
+            int64_t period = (int64_t)s->tx_len * mult;
+            int64_t at = s->tx_tick >= 0 ? s->tx_tick
+                                         : ((s->tx_tick % period) + period) % period;
+            mk[nm].tick = (uint64_t)at; mk[nm].value = (int64_t)s->tx_len;
+            mk[nm].kind = IQW_M_TX_START; nm++;
+            mk[nm].tick = (uint64_t)at; mk[nm].value = (int64_t)s->tx_hash;
+            mk[nm].kind = IQW_M_TX_HASH; nm++;
         }
         h->magic = IQW_MAGIC;
         h->version = IQW_VERSION;
@@ -426,6 +471,9 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         if (g.lag_s > g.max_lag_s) g.max_lag_s = g.lag_s;
         pthread_mutex_unlock(&g.mu);
         *started = 1;
+        s->last_live = live;
+        s->last_cnt64 = cnt64;
+        s->have_last = 1;
         k++;
         if (realtime_s() - t_touch > 30.0) { lock_touch(); t_touch = realtime_s(); }
         if (last) { end = END_STOP; break; }

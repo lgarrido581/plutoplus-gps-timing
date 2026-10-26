@@ -347,6 +347,54 @@ samples were lost), so a gap is never hidden inside an epoch.
 
 Sustainable: ~12.5 MS/s on one channel (≈ 50 MB/s; the prototype's limit).
 
+## 7c. Cyclic TX — `tx_load` / `tx_start` / `tx_stop` / `tx_status`
+
+Advertised by `"tx"` in `ping`'s `caps`. TX1 plays one buffer over and over, for example
+one radar CPI of whole sweeps. The order:
+1. **`tx_load`:** TX tuning can disturb a running RX stream, so this is refused while
+   one runs.
+2. **`stream_start`:** at TX's sample rate; it's refused at any other rate while TX is
+   loaded.
+3. **`tx_start`:** starts the loaded buffer.
+
+`tx_load` is a two-frame request. Frame 0 is
+`{"op":"tx_load","freq_hz":2.4e9,"sample_rate_hz":4e6,"gain_db":-10,"bandwidth_hz":0}`.
+Frame 1 is the ci16 I/Q of one period: at least 64 samples, a whole number of sweeps,
+full scale ±32767 (the DAC takes the top 12 bits).
+- **Defaults:** `gain_db` is TX1's attenuation, −89.75 to 0, default −10;
+  `bandwidth_hz` 0 means the rate.
+- **Steps:**
+  1. Tunes TX (rate shared with RX, TX LO, bandwidth) with the attenuation at −89 dB.
+  2. Puts the AD9361 in FDD.
+  3. Holds axi_tdd channel 2, the TX DMA's gate, HIGH (off, polarity 1).
+  4. Fills a cyclic buffer, then sets the requested attenuation.
+- **Does not start it.** The reply carries the buffer's 64-bit FNV-1a `hash`.
+
+`tx_start` pushes the buffer, which plays until `tx_stop`. pluto_ctld reads the
+pps_counter just before and after the push. With a stream running, the next block carries:
+- **`TX_START`:** at the push's midpoint tick, with value = buffer length in samples.
+  Sweep boundaries are tick + k·len·ticks_per_sample.
+- **`TX_HASH`:** at the same tick, with value = the hash.
+
+Every later epoch restates both at its first period boundary, so the phase is known in
+any epoch. The marker is exact to the push's window (`start_window_counts` in
+`tx_status`) plus a fixed DAC latency; check it against the direct path.
+
+A TX started before the stream is placed only if it started less than 2^31 counter ticks
+earlier (~3.5 min at 5 MS/s).
+
+`tx_stop` sets the attenuation to −89 dB, then frees the buffer. Channel 2 stays HIGH, which
+transmits nothing with no buffer loaded. `tx_status` reports `loaded`, `running`,
+`samples`, `sample_rate_hz`, `freq_hz`, `gain_db`, `hash`, `starts`, `start_live`,
+`start_window_counts` and `ensm_was`.
+
+Between captures and streams, `pluto_ctld` now holds both channel 1 (RX) and channel 2
+(TX) HIGH. Another client driving the TDD core must relatch polarity 0 before using
+windows (`docs/GOTCHAS.md`).
+
+`tdoa/ctl_tx_test.py` runs the whole order against a receiver and checks the markers in
+the ring.
+
 ## 8. Security
 
 A **WRITE** interface (tunes + captures). On the trusted private hardware LAN, no auth

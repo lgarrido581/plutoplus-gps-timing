@@ -144,14 +144,46 @@ static void restore_rx_mode(long long frame_len, long long rate) {
          * (on 0, off = frame) did not do this: enabled without a sync the core sits ARMED
          * with every channel LOW, so ungated captures after a gated one never started. */
         struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
+        struct iio_channel *ch2 = iio_device_find_channel(g_tdd, "channel2", true);
         iio_device_attr_write(g_tdd, "enable", "0");
         if (ch1) {
             iio_channel_attr_write(ch1, "enable", "0");
             iio_channel_attr_write(ch1, "polarity", "1");
         }
+        if (ch2) {    /* the TX DMA's gate, held HIGH the same way: a cyclic TX never starves */
+            iio_channel_attr_write(ch2, "enable", "0");
+            iio_channel_attr_write(ch2, "polarity", "1");
+        }
         iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
     }
     pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
+}
+
+int capture_gate_tx_open(struct iio_context *ctx) {
+    /* channel2 gates the TX DMA, whose only sync mode is "arm": with ch2 LOW a cyclic
+     * buffer never starts. Hold it HIGH as restore_rx_mode holds ch1 (off, polarity 1,
+     * latched across enable 0 -> 1), leaving ch1 as it is; a core left RUNNING by a
+     * sync is parked first. */
+    struct iio_device *tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
+    struct iio_channel *ch2 = tdd ? iio_device_find_channel(tdd, "channel2", true) : NULL;
+    if (!ch2) return -1;
+    long long st = -1;
+    if (iio_device_attr_read_longlong(tdd, "state", &st) == 0 && st == 3) {
+        iio_device_attr_write(tdd, "enable", "1");
+        iio_device_attr_write(tdd, "burst_count", "1");
+        iio_device_attr_write(tdd, "enable", "0");
+        for (int i = 0; i < 125 && st == 3; i++) {
+            struct timespec t = { 0, 20000000L };
+            nanosleep(&t, NULL);
+            if (iio_device_attr_read_longlong(tdd, "state", &st) < 0) break;
+        }
+        iio_device_attr_write(tdd, "burst_count", "0");
+        if (st == 3) return -2;
+    }
+    iio_device_attr_write(tdd, "enable", "0");
+    iio_channel_attr_write(ch2, "enable", "0");
+    iio_channel_attr_write(ch2, "polarity", "1");
+    return iio_device_attr_write(tdd, "enable", "1") < 0 ? -1 : 0;
 }
 
 /* ISO8601 UTC with ns, e.g. 2026-06-23T18:04:05.123456789Z */
