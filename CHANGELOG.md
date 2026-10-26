@@ -46,7 +46,16 @@
   15 s for the first block.
 - `tx_status` reports `underflows`: status reads that found the TX DMA had run dry since
   the previous one. A dry cyclic DMA resumes late, which moves the waveform off its
-  `TX_START` phase.
+  `TX_START` phase. It stayed 0 on node1 at 4 and 12 MS/s with RX streaming.
+- **TX latency default by rate:** 68.5 − 2.375 per MS/s, clamped to 4–12 MS/s (59 at 4,
+  50 at 8, 40 at 12), from the radar's direct-path measurements after the fix above.
+  `latency_samples` still overrides it.
+- **Verified by the radar on node1:**
+  - Back-to-back rate flips 4 → 8 and 8 → 4 MS/s started first time, with
+    `ticks_per_sample` 2 and no ended epochs.
+  - Markers landed −5 samples off at 8 MS/s and +5 at 4 MS/s, against the old constant
+    55.
+  - At 12 MS/s (45 MB/s) one epoch ran with no loss.
 
 ## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
 

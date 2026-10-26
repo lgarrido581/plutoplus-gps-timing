@@ -364,7 +364,8 @@ one radar CPI of whole sweeps. The order:
 3. **`tx_start`:** starts the loaded buffer.
 
 `tx_load` is a two-frame request. Frame 0 is
-`{"op":"tx_load","freq_hz":2.4e9,"sample_rate_hz":4e6,"gain_db":-10,"bandwidth_hz":0,"latency_samples":55}`.
+`{"op":"tx_load","freq_hz":2.4e9,"sample_rate_hz":4e6,"gain_db":-10,"bandwidth_hz":0}`
+(optional `"latency_samples"`, below).
 Frame 1 is the ci16 I/Q of one period: at least 64 samples, a whole number of sweeps,
 full scale ±32767 (the DAC takes the top 12 bits).
 - **Defaults:** `gain_db` is TX1's attenuation, −89.75 to 0, default −10;
@@ -381,16 +382,19 @@ pps_counter just before and after the push. With a stream running, the next bloc
 - **`TX_START`:** at the tick where TX sample 0 reaches the RX samples, with value =
   buffer length in samples. Sweep boundaries are tick + k·len·ticks_per_sample.
   - **Placement:** the DMA starts at the end of the push, so the tick is the after-push
-    reading plus `latency_samples` (default 55).
-  - **Calibration:** measured with the radar's direct path on node1. At 4 MS/s, +59, +59
-    and +52 samples after the push's end over three starts; at 8 MS/s, ~50. The
-    latency is mostly in samples, with a small rate-dependent part (the AD9361's
-    filter chain changes with the rate). `tx_load` can override the constant per rate.
+    reading plus `latency_samples`. By default that is 68.5 − 2.375 per MS/s,
+    rounded, with the rate clamped to the 4–12 MS/s span measured: 59 at 4 MS/s, 50 at
+    8, 40 at 12. `tx_load`'s `latency_samples` overrides it.
+  - **Calibration:** measured with the radar's direct path on node1, TX and RX antennas
+    ~1 m apart, three to six starts at each rate: ~59 samples at 4 MS/s, ~50 at 8, ~40
+    at 12. With the default, the markers landed within ±5 samples at 4 and 8 MS/s. The
+    model is a delay fixed in samples (the filter chains) less one fixed in time
+    (~2.4 µs). Outside 4–12 MS/s, measure and pass `latency_samples`.
 - **`TX_HASH`:** at the same tick, with value = the hash.
 
 Every later epoch restates both at its first period boundary, so the phase is known in
-any epoch. The marker is good to about ±4 samples at 4 MS/s; a direct-path matched
-filter can refine it. `tx_status` reports `start_window_counts` (the push's length)
+any epoch. The marker is good to about ±5 samples; a direct-path matched filter can
+refine it. `tx_status` reports `start_window_counts` (the push's length)
 and `latency_samples`.
 
 A TX started before the stream is placed only if it started less than 2^31 counter ticks
@@ -404,7 +408,8 @@ transmits nothing with no buffer loaded. `tx_status` reports `loaded`, `running`
 `underflows` counts the `tx_status` reads that found the DAC's sticky underflow bit set
 since the previous read; it is cleared 2 ms after the push. A cyclic DMA that runs dry
 resumes late, which shifts the waveform against `TX_START`. Nonzero means resync from the
-direct path.
+direct path. On node1 it stayed 0 over 60 s at 4 MS/s and 40 s at 12 MS/s, with RX
+streaming at the same rate (45 MB/s at 12 MS/s).
 
 Between captures and streams, `pluto_ctld` now holds both channel 1 (RX) and channel 2
 (TX) HIGH. Another client driving the TDD core must relatch polarity 0 before using

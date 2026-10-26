@@ -23,14 +23,17 @@ typedef struct {
     long long rate_hz;       /* sample rate, shared with RX */
     double    gain_db;       /* TX hardwaregain (attenuation): -89.75 .. 0 */
     long long bandwidth_hz;  /* 0 = rate_hz */
-    int       latency_samples; /* < 0 = TX_LATENCY_SAMPLES: from the end of the push to TX
-                              * sample 0 at the RX side (DMA + DAC + RX chain) */
+    int       latency_samples; /* < 0 = tx_default_latency(rate): from the end of the push
+                              * to TX sample 0 at the RX side (DMA + DAC + RX chain) */
 } tx_req_t;
 
-/* Measured on node1 (2026-10-26, 4 MS/s, TX LPDA ~1 m from RX LPDA): the DMA starts at the
- * END of the push, and the direct path's matched filter put TX sample 0 55 +- 4 samples
- * after it (+59, +59, +52 over three starts; the push windows were 172..1504 counts). */
-#define TX_LATENCY_SAMPLES 55
+/* Measured on node1 (2026-10-26, TX LPDA ~1 m from RX LPDA): the DMA starts at the END of
+ * the push, and the direct path's matched filter put TX sample 0 ~59 samples after it at
+ * 4 MS/s, ~50 at 8 and ~40 at 12 (+-4 over three to six starts each). That is linear in the
+ * rate, 68.5 - 2.375 per MS/s: a delay fixed in samples (the filter chains) less one fixed
+ * in time (~2.4 us, the DMA starting before the after-push read). Clamped to 4..12 MS/s,
+ * the span measured. */
+int  tx_default_latency(long long rate_hz);
 
 /* Tune TX and load `bytes` of ci16 I/Q (one cyclic period; bytes % 4 == 0), not started.
  * Replaces a loaded or running buffer. 0 ok, -1 with err set. */

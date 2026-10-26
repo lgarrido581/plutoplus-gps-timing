@@ -11,6 +11,7 @@
 #include "pps_timestamp.h"
 
 #include <iio.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +44,13 @@ static uint64_t fnv1a64(const void *p, size_t n) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
     return h;
+}
+
+int tx_default_latency(long long rate_hz) {
+    double ms = (double)rate_hz / 1e6;
+    if (ms < 4.0) ms = 4.0;
+    if (ms > 12.0) ms = 12.0;
+    return (int)lround(68.5 - 2.375 * ms);
 }
 
 static void release(void) {   /* caller holds T.mu */
@@ -122,7 +130,7 @@ int tx_load(const tx_req_t *req, const void *iq, size_t bytes, char *err, size_t
     T.rate_hz = fs;
     T.freq_hz = fc;
     T.gain_db = req->gain_db;
-    T.latency = req->latency_samples >= 0 ? req->latency_samples : TX_LATENCY_SAMPLES;
+    T.latency = req->latency_samples >= 0 ? req->latency_samples : tx_default_latency(fs);
     T.hash = fnv1a64(iq, bytes);
     T.running = 0;
     T.underflows = 0;
