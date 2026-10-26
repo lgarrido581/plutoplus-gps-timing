@@ -44,6 +44,11 @@
   `enable 1` to a core that is already enabled latches nothing. `pluto_ctld` holds channel 1
   HIGH this way between captures, and latches it LOW the same way (from disabled) before a
   gated one. Seen on node1, 2026-10-25.
+  - **Anyone else driving the TDD core inherits that polarity 1.** A client (iiod/pyadi, a
+    radar driver) that turns channel 1 back on with a window must first latch polarity 0:
+    disable the core, set polarity 0, then enable it. Otherwise the window comes out
+    inverted, LOW while "open". The radar got one CPI per frame wrap that way until its
+    driver relatched (2026-10-26).
 
 - **`iio_attr -q` writes may silently not happen** on the shipped libiio 0.26. Use the plain
   form and redirect its output.
