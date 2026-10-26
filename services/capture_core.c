@@ -36,11 +36,15 @@
                                   * rate: the XO is held within ~25 ppm, but the second after
                                   * a sample-rate change counts a mix of the old and new rates
                                   * (seen 25.72 M for 25.00 M) */
+#define RATE_SETTLE_S 2.1        /* PPS_DELTA counts the last whole GPS second: this long
+                                  * after a rate change that second lies wholly after it */
 
 static struct iio_device *g_tdd = NULL;
 static int g_tdd_v2 = 0;
 static int g_lclk_multiple = 0;  /* last multiple a settled PPS_DELTA confirmed (the channel
                                   * mode is fixed at boot); 0 = none yet */
+static long long g_rate_seen = 0;       /* the sample rate as last written or read */
+static double g_rate_since = -1e9;      /* CLOCK_MONOTONIC s when it took that value */
 
 static int sysfs_write(const char *name, long long value) {
     char path[256];
@@ -241,13 +245,47 @@ static long long max_block_bytes(void) {
 
 long long capture_block_cap(void) { return max_block_bytes(); }
 
+static double mono_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+/* A rate seen for the first time since start counts as long settled; a change starts the
+ * clock. Rates written by another client are noticed when next read. */
+static void rate_note(long long rate_hz) {
+    if (rate_hz <= 0 || rate_hz == g_rate_seen) return;
+    if (g_rate_seen != 0) g_rate_since = mono_s();
+    g_rate_seen = rate_hz;
+}
+
+long long capture_set_rate(struct iio_channel *p_rx, long long rate_hz) {
+    long long cur = 0;
+    if (iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur) == 0) rate_note(cur);
+    iio_channel_attr_write_longlong(p_rx, "sampling_frequency", rate_hz);
+    cur = rate_hz;
+    iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur);
+    rate_note(cur);
+    return cur;
+}
+
+double capture_rate_settle_left(long long cur_rate_hz) {
+    rate_note(cur_rate_hz);
+    double left = RATE_SETTLE_S - (mono_s() - g_rate_since);
+    return left > 0.0 ? left : 0.0;
+}
+
+int capture_lclk_known(void) { return g_lclk_multiple != 0; }
+
 int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta) {
     /* conservative Pluto+ fallback, or the last multiple a settled count confirmed */
     int m = g_lclk_multiple ? g_lclk_multiple : 2;
-    if (pps_delta > 0 && cur_rate_hz > 0) {
+    /* Only a count taken wholly at this rate decides. For ~2 s after a rate change
+     * PPS_DELTA counts the old rate, or a mix; a whole second of the old rate is an exact
+     * multiple of the new one when the two differ by a power of two, so the 1000 ppm test
+     * alone passed it: 8 -> 4 MS/s read as multiple 4, 4 -> 8 as 1 (node1, 2026-10-26). */
+    if (pps_delta > 0 && cur_rate_hz > 0 && capture_rate_settle_left(cur_rate_hz) <= 0.0) {
         long long r = ((long long)pps_delta + cur_rate_hz / 2) / cur_rate_hz;  /* round */
-        /* Only a settled count decides: within ~2 s of a rate change PPS_DELTA still
-         * counts the old rate, or a mix, and can round to the wrong multiple. */
         double dev = (double)pps_delta - (double)(r * cur_rate_hz);
         if (dev < 0.0) dev = -dev;
         if (r >= 1 && r <= 4 && dev <= CNT_TOL * (double)(r * cur_rate_hz))
@@ -343,7 +381,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     pps.cnt_tol = CNT_TOL;
 
     /* --- tune RX0: rate + bandwidth + gain on phy voltage0(in), LO on altvoltage0. */
-    iio_channel_attr_write_longlong(p_rx, "sampling_frequency", req->rate_hz);
+    capture_set_rate(p_rx, req->rate_hz);
     iio_channel_attr_write_longlong(p_rx, "rf_bandwidth", req->rate_hz);
     if (req->have_gain) {
         iio_channel_attr_write(p_rx, "gain_control_mode", "manual");

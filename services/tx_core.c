@@ -14,9 +14,12 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #define R_LIVE (0x0C / 4)
 #define TX_ATTEN_OFF "-89.000000"
+#define DAC_UI_STATUS 0x80000088u   /* DAC core register (DEBUGFS_DRA_PCORE_REG_MAGIC) */
+#define DAC_UNF       0x1u          /* sticky, write 1 to clear: the TX DMA ran dry */
 
 static struct {
     pthread_mutex_t     mu;
@@ -31,6 +34,7 @@ static struct {
     uint32_t            live0, live1;
     int                 latency;   /* samples from the push's end to TX sample 0 at RX */
     unsigned            gen;
+    unsigned            underflows;   /* tx_status reads that found the DAC had run dry */
     char                ensm_was[32];
 } T = { .mu = PTHREAD_MUTEX_INITIALIZER };
 
@@ -85,7 +89,7 @@ int tx_load(const tx_req_t *req, const void *iq, size_t bytes, char *err, size_t
     }
     /* tune: the rate is shared with RX; TX LO, bandwidth, attenuation are TX1's own */
     iio_channel_attr_write(ptx, "hardwaregain", TX_ATTEN_OFF);      /* quiet while tuning */
-    iio_channel_attr_write_longlong(prx, "sampling_frequency", req->rate_hz);
+    capture_set_rate(prx, req->rate_hz);
     iio_channel_attr_write_longlong(plo, "frequency", req->freq_hz);
     iio_channel_attr_write_longlong(ptx, "rf_bandwidth",
                                     req->bandwidth_hz > 0 ? req->bandwidth_hz : req->rate_hz);
@@ -121,6 +125,7 @@ int tx_load(const tx_req_t *req, const void *iq, size_t bytes, char *err, size_t
     T.latency = req->latency_samples >= 0 ? req->latency_samples : TX_LATENCY_SAMPLES;
     T.hash = fnv1a64(iq, bytes);
     T.running = 0;
+    T.underflows = 0;
     pthread_mutex_unlock(&T.mu);
     return 0;
 }
@@ -140,6 +145,11 @@ int tx_start(char *err, size_t el) {
         snprintf(err, el, "TX push failed (%zd)", n);
         return -1;
     }
+    /* the DAC ran dry while it waited for the push: clear that, then count real ones (a
+     * cyclic DMA that runs dry resumes late, so TX_START no longer marks its phase) */
+    usleep(2000);
+    iio_device_reg_write(T.tx, DAC_UI_STATUS, DAC_UNF);
+    T.underflows = 0;
     T.live0 = l0;
     T.live1 = l1;
     T.running = 1;
@@ -150,14 +160,20 @@ int tx_start(char *err, size_t el) {
 
 void tx_status(char *json, size_t len) {
     pthread_mutex_lock(&T.mu);
+    uint32_t st = 0;
+    if (T.running && iio_device_reg_read(T.tx, DAC_UI_STATUS, &st) == 0 && (st & DAC_UNF)) {
+        T.underflows++;
+        iio_device_reg_write(T.tx, DAC_UI_STATUS, DAC_UNF);
+    }
     snprintf(json, len,
         "{\"loaded\":%s,\"running\":%s,\"samples\":%zu,\"sample_rate_hz\":%lld,"
         "\"freq_hz\":%lld,\"gain_db\":%.2f,\"hash\":\"0x%016llx\",\"starts\":%u,"
         "\"start_live_after\":%u,\"start_window_counts\":%u,\"latency_samples\":%d,"
-        "\"ensm_was\":\"%s\"}",
+        "\"underflows\":%u,\"ensm_was\":\"%s\"}",
         T.buf ? "true" : "false", T.running ? "true" : "false", T.nsamp, T.rate_hz,
         T.freq_hz, T.gain_db, (unsigned long long)T.hash, T.gen, T.live1,
-        (uint32_t)(T.live1 - T.live0), T.latency, T.ensm_was[0] ? T.ensm_was : "unknown");
+        (uint32_t)(T.live1 - T.live0), T.latency, T.underflows,
+        T.ensm_was[0] ? T.ensm_was : "unknown");
     pthread_mutex_unlock(&T.mu);
 }
 

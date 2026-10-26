@@ -57,15 +57,29 @@ long long capture_block_cap(void);
 
 /* The AD936x interface multiple (counter ticks per sample, 1-4) from the current rate and
  * PPS_DELTA, accepted only when the count is settled (within 1000 ppm of a whole
- * multiple); otherwise the last multiple confirmed, or 2. Shared by capture and stream. */
+ * multiple, and taken wholly after the last rate change); otherwise the last multiple
+ * confirmed, or 2. Shared by capture, stream and TX. */
 int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta);
+
+/* 1 once a settled count has confirmed the multiple (it is fixed for the boot). */
+int capture_lclk_known(void);
+
+/* Seconds until PPS_DELTA counts only the current rate (0: it does now). */
+double capture_rate_settle_left(long long cur_rate_hz);
+
+struct iio_context;
+struct iio_device;
+struct iio_channel;
+
+/* Write the sample rate on ad9361-phy voltage0 (in), noting a change for
+ * capture_lclk_multiple. Every rate write in pluto_ctld goes through here. Returns the
+ * rate read back. */
+long long capture_set_rate(struct iio_channel *p_rx, long long rate_hz);
 
 /* The RX-DMA gate, for the stream (stream_core.c). capture_gate_hold: axi_tdd parked if it
  * was running, then off with channel 1 latched LOW, so pps_counter's window owns the gate
  * (0 ok, -1 no axi_tdd, -2 would not park). capture_gate_open: channel 1 held HIGH (as
  * after boot) and pps_counter's window off -- free-running RX. */
-struct iio_context;
-struct iio_device;
 int  capture_gate_hold(struct iio_context *ctx);
 
 /* Put the AD9361 (ad9361-phy) in FDD if it is not: in ALERT, left there by another

@@ -234,9 +234,10 @@ reply's IQ still unsent (§7); a DMA/refill fault; a malformed/unknown request. 
 - **Rate cap (enforced).** The AD936x data clock is
   `l_clk = interface_multiplier × sample_rate`; overrunning the interface wedges
   the RX DMA (reboot to clear). The server detects the multiplier from the live
-  counter and current rate, accepting only a count within 1000 ppm of a whole multiple
-  (right after a rate change the counter still holds the old rate), and otherwise uses
-  the last multiple it confirmed. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
+  counter and current rate. It accepts only a count within 1000 ppm of a whole multiple
+  and taken at least 2.1 s after the last rate change, and otherwise uses the last
+  multiple it confirmed. Until then the counter still holds the old rate, which is an
+  exact multiple of the new one when the rates differ by a power of two. Pluto+ uses a 61.44 MHz `l_clk` ceiling (normally
   1×/2×); LibreSDR's validated 2R2T LVDS path uses 4× with a 122.88 MHz ceiling.
   Both therefore cap the common 2R2T configuration at 30.72 MSPS.
 - **Capture length.** One capture is one DMA block, gap-free. Three limits apply:
@@ -313,7 +314,12 @@ measured per second by the PPS markers instead.
 frame, `{"ok":true,"api":...,"stream":{...status...}}`. If the stream can't start, it's
 one `{"error":...}` frame. The causes include: no live PPS, no receiver taking blocks,
 more than ~56 MB/s (`sample_rate_hz × channels × 4` past the Pluto+'s send ceiling), or a
-bad request. The reply takes up to the retune time plus ~1–2 s.
+bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15 s:
+- **First arm:** it is retried once (a missed PPS edge, say). The failed try still
+  counts in `ended`.
+- **Rate just changed:** if no `l_clk` multiple has been confirmed since `pluto_ctld`
+  started, the start first waits until 2.1 s after the change (by `tx_load`, for
+  example).
 
 `stream_stop` sends one more block, flagged `LAST`, then stops. It restores the gate as
 a capture leaves it (channel 1 HIGH, PPS window off) and answers with the final status.
@@ -376,9 +382,10 @@ pps_counter just before and after the push. With a stream running, the next bloc
   buffer length in samples. Sweep boundaries are tick + k·len·ticks_per_sample.
   - **Placement:** the DMA starts at the end of the push, so the tick is the after-push
     reading plus `latency_samples` (default 55).
-  - **Calibration:** measured with the radar's direct path on node1 at 4 MS/s (+59, +59,
-    +52 samples after the push's end over three starts). `tx_load` can override the
-    constant per rate.
+  - **Calibration:** measured with the radar's direct path on node1. At 4 MS/s, +59, +59
+    and +52 samples after the push's end over three starts; at 8 MS/s, ~50. The
+    latency is mostly in samples, with a small rate-dependent part (the AD9361's
+    filter chain changes with the rate). `tx_load` can override the constant per rate.
 - **`TX_HASH`:** at the same tick, with value = the hash.
 
 Every later epoch restates both at its first period boundary, so the phase is known in
@@ -392,7 +399,12 @@ earlier (~3.5 min at 5 MS/s).
 `tx_stop` sets the attenuation to −89 dB, then frees the buffer. Channel 2 stays HIGH, which
 transmits nothing with no buffer loaded. `tx_status` reports `loaded`, `running`,
 `samples`, `sample_rate_hz`, `freq_hz`, `gain_db`, `hash`, `starts`, `start_live`,
-`start_window_counts` and `ensm_was`.
+`start_window_counts`, `underflows` and `ensm_was`.
+
+`underflows` counts the `tx_status` reads that found the DAC's sticky underflow bit set
+since the previous read; it is cleared 2 ms after the push. A cyclic DMA that runs dry
+resumes late, which shifts the waveform against `TX_START`. Nonzero means resync from the
+direct path.
 
 Between captures and streams, `pluto_ctld` now holds both channel 1 (RX) and channel 2
 (TX) HIGH. Another client driving the TDD core must relatch polarity 0 before using

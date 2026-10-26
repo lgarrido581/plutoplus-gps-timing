@@ -173,6 +173,10 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
 
     long long cur = 0;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur);
+    /* just after a rate change (a tx_load) PPS_DELTA still counts the old rate: with no
+     * multiple confirmed yet, wait for a whole second at this one */
+    double settle = capture_rate_settle_left(cur);
+    if (settle > 0.0 && !capture_lclk_known()) usleep((useconds_t)(settle * 1e6));
     int mult = capture_lclk_multiple(cur, s->pps.regs[R_PPS_DELTA]);
     double bps = (double)r->rate_hz * r->channels * 4.0;
     if (bps > SEND_CEILING_BPS) {
@@ -187,7 +191,7 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
 
     /* tune once: a rate or LO write disturbs the sample clock for that second */
     struct iio_channel *prx[2] = { p_rx, p_rx1 };
-    iio_channel_attr_write_longlong(p_rx, "sampling_frequency", r->rate_hz);
+    capture_set_rate(p_rx, r->rate_hz);
     for (int c = 0; c < r->channels; c++) {
         iio_channel_attr_write_longlong(prx[c], "rf_bandwidth", r->rate_hz);
         if (r->have_gain) {
@@ -499,7 +503,7 @@ static void *run(void *arg) {
     } else {
         unsigned epoch = 0;
         uint32_t seq = 0;
-        int prev_end = -1, ever = 0, tries = 0;
+        int prev_end = -1, ever = 0, tries = 0, first_tries = 0;
         while (!g.stop) {
             int started = 0;
             int end = run_epoch(&s, &r, epoch, &seq, prev_end, &started, err, sizeof err);
@@ -509,7 +513,12 @@ static void *run(void *arg) {
             pthread_mutex_unlock(&g.mu);
             if (started) { epoch++; ever = 1; tries = 0; }
             if (end == END_STOP) break;
-            if (!ever) { failed = 1; break; }          /* stream_start reports it */
+            /* the first epoch gets a second try at arming (a missed PPS edge); anything
+             * else, stream_start reports */
+            if (!ever && !((end == END_ARM || end == END_NOEDGE) && ++first_tries < 2)) {
+                failed = 1;
+                break;
+            }
             /* a missing receiver may come back: keep trying until stream_stop. The radio
              * failing to arm ten times running is a hardware problem: give up. */
             if (!started && end != END_SEND && ++tries >= 10) { failed = 1; break; }
@@ -571,8 +580,9 @@ int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) 
         return -1;
     }
     g.thread_live = 1;
-    /* tune (up to ~3 s for a new rate) + a fresh PPS + the arm + block 0 */
-    for (int i = 0; i < 600; i++) {
+    /* tune (up to ~3 s for a new rate), up to 2.1 s for the rate to settle, a fresh PPS +
+     * the arm + block 0, and one retry of the arm */
+    for (int i = 0; i < 750; i++) {
         pthread_mutex_lock(&g.mu);
         int st = g.state, ex = g.exited;
         pthread_mutex_unlock(&g.mu);
@@ -587,7 +597,7 @@ int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) 
     g.stop = 1;
     pthread_join(g.thr, NULL);
     g.thread_live = 0;
-    snprintf(err, errlen, "stream did not start within 12 s");
+    snprintf(err, errlen, "stream did not start within 15 s");
     return -1;
 }
 

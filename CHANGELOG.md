@@ -28,6 +28,25 @@
   - **Incident:** another libiio client had left it in ALERT on node1, and every gated
     capture came back at twice the rate, as constant DC ("finished 19.9 ms early").
   - **Reported:** `ctl:ensm_was` in the meta, `ensm_was` in stream and TX status.
+- **Fixed: the `l_clk` multiple was misread for ~2 s after a rate change by a power of
+  two.** PPS_DELTA still counted the old rate, and that count is an exact multiple of the
+  new rate, so the 1000 ppm test passed it.
+  - **Seen on node1 by the radar:** `tx_load` at a new rate, then `stream_start` at once.
+    - 8 → 4 MS/s read multiple 4. The PPS frame was two seconds long, the window was
+      never released, and the start failed with `arm`.
+    - 4 → 8 MS/s read multiple 1. Each epoch ended on `lag` within a second, and
+      `TX_START` was placed with half the true multiple.
+  - **Fix:** every rate write in `pluto_ctld` goes through `capture_set_rate`, which
+    notes the change. Only a PPS_DELTA taken 2.1 s or more after it can set the multiple;
+    until then the last confirmed one is used. With none confirmed yet, `stream_start`
+    waits out the 2.1 s.
+  - Gated captures share the code, and were exposed the same way when a rate change
+    came less than a second before the next capture.
+- `stream_start` retries the first epoch's arm once (a missed PPS edge), and waits up to
+  15 s for the first block.
+- `tx_status` reports `underflows`: status reads that found the TX DMA had run dry since
+  the previous one. A dry cyclic DMA resumes late, which moves the waveform off its
+  `TX_START` phase.
 
 ## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
 
