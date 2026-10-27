@@ -36,11 +36,19 @@
                                   * rate: the XO is held within ~25 ppm, but the second after
                                   * a sample-rate change counts a mix of the old and new rates
                                   * (seen 25.72 M for 25.00 M) */
+#define RATE_SETTLE_S 2.1        /* PPS_DELTA counts the last whole GPS second: this long
+                                  * after a rate change that second lies wholly after it */
 
 static struct iio_device *g_tdd = NULL;
 static int g_tdd_v2 = 0;
 static int g_lclk_multiple = 0;  /* last multiple a settled PPS_DELTA confirmed (the channel
                                   * mode is fixed at boot); 0 = none yet */
+static long long g_rate_seen = 0;       /* the sample rate as last written or read */
+static double g_rate_since = -1e9;      /* CLOCK_MONOTONIC s when it took that value */
+static int g_latched[3] = { -1, -1, -1 }; /* axi_tdd channel polarities at this daemon's last
+                                          * enable 0 -> 1 (what a disabled or idle channel
+                                          * drives); -1 = none since start */
+static double g_latched_at = 0.0;       /* CLOCK_REALTIME s of that transition */
 
 static int sysfs_write(const char *name, long long value) {
     char path[256];
@@ -50,6 +58,52 @@ static int sysfs_write(const char *name, long long value) {
     int rc = fprintf(f, "%lld\n", value) < 0 ? -2 : 0;
     if (fclose(f) != 0 && rc == 0) rc = -3;
     return rc;
+}
+
+static long long sysfs_ll(const char *dir, const char *name) {
+    char path[320], b[64] = "";
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(b, sizeof b, f)) b[0] = '\0';
+    fclose(f);
+    return b[0] ? atoll(b) : -1;
+}
+
+/* The axi_tdd's sysfs directory: the IIO device labeled iio-axi-tdd-0 (its name is
+ * adi-iio-fakedev), else LibreSDR's TDD v2 platform device. Found once. */
+static const char *tdd_sysfs_dir(void) {
+    static char dir[96] = "";
+    if (dir[0]) return dir;
+    for (int i = 0; i < 16; i++) {
+        char path[96], b[64] = "";
+        snprintf(path, sizeof path, "/sys/bus/iio/devices/iio:device%d/label", i);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (!fgets(b, sizeof b, f)) b[0] = '\0';
+        fclose(f);
+        if (strncmp(b, "iio-axi-tdd-0", 13) == 0) {
+            snprintf(dir, sizeof dir, "/sys/bus/iio/devices/iio:device%d", i);
+            return dir;
+        }
+    }
+    if (access(TDD_V2_PATH "/enable", F_OK) == 0) snprintf(dir, sizeof dir, "%s", TDD_V2_PATH);
+    return dir;
+}
+
+/* Called right after each enable 0 -> 1 this daemon makes: the polarities then in the
+ * registers are what the channels now drive while off (or while the core is disabled). */
+static void note_latch(void) {
+    const char *d = tdd_sysfs_dir();
+    if (!d[0]) return;
+    for (int c = 0; c < 3; c++) {
+        char a[32];
+        snprintf(a, sizeof a, "out_channel%d_polarity", c);
+        g_latched[c] = (int)sysfs_ll(d, a);
+    }
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    g_latched_at = (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
 /* Coincident (PPS-anchored) capture. With sync_ext ALONE (CONTROL=0x9), ADI's axi_tdd re-syncs
@@ -102,6 +156,7 @@ static int configure_tdd(struct iio_context *ctx) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 0);
         sysfs_write("enable", 1);
+        note_latch();
         return sysfs_write("enable", 0); /* ch1 LOW: yield the OR to pps_counter */
     }
     if (!g_tdd) return -1;
@@ -115,6 +170,7 @@ static int configure_tdd(struct iio_context *ctx) {
         iio_channel_attr_write(ch1, "polarity", "0");
         iio_channel_attr_write(ch1, "enable", "0");
         iio_device_attr_write(g_tdd, "enable", "1");
+        note_latch();
     }
     /* iio_device_attr_write returns the BYTE COUNT on success (not 0); the caller
      * checks != 0, so returning it raw read every success as failure. Normalize. */
@@ -135,6 +191,7 @@ static void restore_rx_mode(long long frame_len, long long rate) {
         sysfs_write("out_channel1_polarity", 0);
         sysfs_write("out_channel1_enable", 1);
         sysfs_write("enable", 1);
+        note_latch();
         pps_ts_disable_frame();
         return;
     }
@@ -144,14 +201,73 @@ static void restore_rx_mode(long long frame_len, long long rate) {
          * (on 0, off = frame) did not do this: enabled without a sync the core sits ARMED
          * with every channel LOW, so ungated captures after a gated one never started. */
         struct iio_channel *ch1 = iio_device_find_channel(g_tdd, "channel1", true);
+        struct iio_channel *ch2 = iio_device_find_channel(g_tdd, "channel2", true);
         iio_device_attr_write(g_tdd, "enable", "0");
         if (ch1) {
             iio_channel_attr_write(ch1, "enable", "0");
             iio_channel_attr_write(ch1, "polarity", "1");
         }
+        if (ch2) {    /* the TX DMA's gate, held HIGH the same way: a cyclic TX never starves */
+            iio_channel_attr_write(ch2, "enable", "0");
+            iio_channel_attr_write(ch2, "polarity", "1");
+        }
         iio_device_attr_write(g_tdd, "enable", "1");      /* ch1 HIGH -> OR HIGH -> streaming RX */
+        note_latch();
     }
     pps_ts_disable_frame();   /* tdd_enable -> 0: axi_tdd alone gates streaming */
+}
+
+int capture_gate_tx_open(struct iio_context *ctx) {
+    /* channel2 gates the TX DMA, whose only sync mode is "arm": with ch2 LOW a cyclic
+     * buffer never starts. Hold it HIGH as restore_rx_mode holds ch1 (off, polarity 1,
+     * latched across enable 0 -> 1), leaving ch1 as it is; a core left RUNNING by a
+     * sync is parked first. */
+    struct iio_device *tdd = iio_context_find_device(ctx, "iio-axi-tdd-0");
+    struct iio_channel *ch2 = tdd ? iio_device_find_channel(tdd, "channel2", true) : NULL;
+    if (!ch2) return -1;
+    long long st = -1;
+    if (iio_device_attr_read_longlong(tdd, "state", &st) == 0 && st == 3) {
+        iio_device_attr_write(tdd, "enable", "1");
+        iio_device_attr_write(tdd, "burst_count", "1");
+        iio_device_attr_write(tdd, "enable", "0");
+        for (int i = 0; i < 125 && st == 3; i++) {
+            struct timespec t = { 0, 20000000L };
+            nanosleep(&t, NULL);
+            if (iio_device_attr_read_longlong(tdd, "state", &st) < 0) break;
+        }
+        iio_device_attr_write(tdd, "burst_count", "0");
+        if (st == 3) return -2;
+    }
+    iio_device_attr_write(tdd, "enable", "0");
+    iio_channel_attr_write(ch2, "enable", "0");
+    iio_channel_attr_write(ch2, "polarity", "1");
+    int rc = iio_device_attr_write(tdd, "enable", "1") < 0 ? -1 : 0;
+    note_latch();
+    return rc;
+}
+
+void capture_tdd_status(char *json, size_t len) {
+    const char *d = tdd_sysfs_dir();
+    if (!d[0]) { snprintf(json, len, "{\"found\":false}"); return; }
+    char ch[3][160];
+    for (int c = 0; c < 3; c++) {
+        char a[4][32];
+        snprintf(a[0], sizeof a[0], "out_channel%d_enable", c);
+        snprintf(a[1], sizeof a[1], "out_channel%d_polarity", c);
+        snprintf(a[2], sizeof a[2], "out_channel%d_on_raw", c);
+        snprintf(a[3], sizeof a[3], "out_channel%d_off_raw", c);
+        snprintf(ch[c], sizeof ch[c],
+                 "{\"enable\":%lld,\"polarity\":%lld,\"on_raw\":%lld,\"off_raw\":%lld,"
+                 "\"latched\":%d}",
+                 sysfs_ll(d, a[0]), sysfs_ll(d, a[1]), sysfs_ll(d, a[2]), sysfs_ll(d, a[3]),
+                 g_latched[c]);
+    }
+    snprintf(json, len,
+             "{\"found\":true,\"sysfs\":\"%s\",\"enable\":%lld,\"state\":%lld,"
+             "\"burst_count\":%lld,\"frame_length_raw\":%lld,\"latched_at\":%.3f,"
+             "\"channels\":[%s,%s,%s]}",
+             d, sysfs_ll(d, "enable"), sysfs_ll(d, "state"), sysfs_ll(d, "burst_count"),
+             sysfs_ll(d, "frame_length_raw"), g_latched_at, ch[0], ch[1], ch[2]);
 }
 
 /* ISO8601 UTC with ns, e.g. 2026-06-23T18:04:05.123456789Z */
@@ -209,6 +325,70 @@ static long long max_block_bytes(void) {
 
 long long capture_block_cap(void) { return max_block_bytes(); }
 
+static double mono_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+/* A rate seen for the first time since start counts as long settled; a change starts the
+ * clock. Rates written by another client are noticed when next read. */
+static void rate_note(long long rate_hz) {
+    if (rate_hz <= 0 || rate_hz == g_rate_seen) return;
+    if (g_rate_seen != 0) g_rate_since = mono_s();
+    g_rate_seen = rate_hz;
+}
+
+long long capture_set_rate(struct iio_channel *p_rx, long long rate_hz) {
+    long long cur = 0;
+    if (iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur) == 0) rate_note(cur);
+    iio_channel_attr_write_longlong(p_rx, "sampling_frequency", rate_hz);
+    cur = rate_hz;
+    iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur);
+    rate_note(cur);
+    return cur;
+}
+
+double capture_rate_settle_left(long long cur_rate_hz) {
+    rate_note(cur_rate_hz);
+    double left = RATE_SETTLE_S - (mono_s() - g_rate_since);
+    return left > 0.0 ? left : 0.0;
+}
+
+int capture_lclk_known(void) { return g_lclk_multiple != 0; }
+
+int capture_lclk_multiple(long long cur_rate_hz, uint32_t pps_delta) {
+    /* conservative Pluto+ fallback, or the last multiple a settled count confirmed */
+    int m = g_lclk_multiple ? g_lclk_multiple : 2;
+    /* Only a count taken wholly at this rate decides. For ~2 s after a rate change
+     * PPS_DELTA counts the old rate, or a mix; a whole second of the old rate is an exact
+     * multiple of the new one when the two differ by a power of two, so the 1000 ppm test
+     * alone passed it: 8 -> 4 MS/s read as multiple 4, 4 -> 8 as 1 (node1, 2026-10-26). */
+    if (pps_delta > 0 && cur_rate_hz > 0 && capture_rate_settle_left(cur_rate_hz) <= 0.0) {
+        long long r = ((long long)pps_delta + cur_rate_hz / 2) / cur_rate_hz;  /* round */
+        double dev = (double)pps_delta - (double)(r * cur_rate_hz);
+        if (dev < 0.0) dev = -dev;
+        if (r >= 1 && r <= 4 && dev <= CNT_TOL * (double)(r * cur_rate_hz))
+            m = g_lclk_multiple = (int)r;
+    }
+    return m;
+}
+
+int capture_assert_fdd(struct iio_device *phy, char *was, size_t len) {
+    /* The receiver only produces data in FDD. Another libiio client can leave the chip in
+     * ALERT; the DMA then fills with a constant DC level, at the wrong rate (seen on node1,
+     * 2026-10-26: every gated capture "finished 19.9 ms early" for an hour). */
+    char cur[32] = "";
+    if (iio_device_attr_read(phy, "ensm_mode", cur, sizeof cur) <= 0) cur[0] = '\0';
+    for (char *p = cur; *p; p++) if (*p == '\n' || *p == '\r') *p = '\0';
+    if (was && len) snprintf(was, len, "%s", cur[0] ? cur : "unknown");
+    if (strcmp(cur, "fdd") == 0) return 0;
+    return iio_device_attr_write(phy, "ensm_mode", "fdd") < 0 ? -1 : 0;
+}
+
+int  capture_gate_hold(struct iio_context *ctx) { return configure_tdd(ctx); }
+void capture_gate_open(long long frame_len, long long rate_hz) { restore_rx_mode(frame_len, rate_hz); }
+
 int capture_run(const capture_req_t *req, capture_result_t *out) {
     out->meta_json = NULL; out->iq = NULL; out->iq_len = 0; out->priv = NULL;
     out->err[0] = '\0';
@@ -237,20 +417,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     int have_pps = (pps_ts_init(&pps, LCLK_FALLBACK_HZ) == 0);
     long long cur_rate = 0;
     iio_channel_attr_read_longlong(p_rx, "sampling_frequency", &cur_rate);
-    /* conservative Pluto+ fallback, or the last multiple a settled count confirmed */
-    int lclk_multiple = g_lclk_multiple ? g_lclk_multiple : 2;
-    if (have_pps) {
-        uint32_t cnt = pps_ts_cnt_hz(&pps);
-        if (cnt > 0 && cur_rate > 0) {
-            long long r = ((long long)cnt + cur_rate / 2) / cur_rate;  /* round */
-            /* Only a settled count decides: within ~2 s of a rate change PPS_DELTA still
-             * counts the old rate, or a mix, and can round to the wrong multiple. */
-            double dev = (double)cnt - (double)(r * cur_rate);
-            if (dev < 0.0) dev = -dev;
-            if (r >= 1 && r <= 4 && dev <= CNT_TOL * (double)(r * cur_rate))
-                lclk_multiple = g_lclk_multiple = (int)r;
-        }
-    }
+    int lclk_multiple = capture_lclk_multiple(cur_rate, have_pps ? pps_ts_cnt_hz(&pps) : 0);
     double lclk_max = lclk_multiple > 2 ? LIBRE_LCLK_MAX_HZ : PLUTO_LCLK_MAX_HZ;
     double max_rate = lclk_max / (double)lclk_multiple;
     if (max_rate > 61440000.0) max_rate = 61440000.0; /* AD936x sample-rate limit */
@@ -294,7 +461,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
     pps.cnt_tol = CNT_TOL;
 
     /* --- tune RX0: rate + bandwidth + gain on phy voltage0(in), LO on altvoltage0. */
-    iio_channel_attr_write_longlong(p_rx, "sampling_frequency", req->rate_hz);
+    capture_set_rate(p_rx, req->rate_hz);
     iio_channel_attr_write_longlong(p_rx, "rf_bandwidth", req->rate_hz);
     if (req->have_gain) {
         iio_channel_attr_write(p_rx, "gain_control_mode", "manual");
@@ -303,6 +470,10 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
         iio_channel_attr_write(p_rx, "gain_control_mode", "slow_attack");
     }
     iio_channel_attr_write_longlong(p_lo, "frequency", req->freq_hz);
+    char ensm_was[32];
+    capture_assert_fdd(phy, ensm_was, sizeof ensm_was);
+    if (strcmp(ensm_was, "fdd") != 0)
+        fprintf(stderr, "pluto_ctld: ensm_mode was %s -- set fdd\n", ensm_was);
 
     /* core:frequency MUST be the ACTUAL chip LO read back (the AD9361 silently clamps
      * an out-of-range LO and holds its old value); DSN trusts this over the request. */
@@ -688,6 +859,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       "      \"ctl:arm_frame_pos\": %u,\n"
       "      \"ctl:start_check_ms\": %.3f,\n"
       "      \"ctl:cnt_clk_settled\": %s,\n"
+      "      \"ctl:ensm_was\": \"%s\",\n"
       "      \"ctl:start_edge_latched\": %s\n"
       "    }\n"
       "  ],\n"
@@ -701,6 +873,7 @@ int capture_run(const capture_req_t *req, capture_result_t *out) {
       dbg_lc, dbg_lseq, dbg_lseq_prev, (unsigned long long)dbg_lgps,
       dbg_ppsc, (long)dbg_latch_off, alloc_ms, block_cap, arm_pos, start_check_ms,
       pps_ts_cnt_used(&pps, anchor.cnt_hz) == (double)anchor.cnt_hz ? "true" : "false",
+      ensm_was,
       no_start_edge ? "false" : "true");
 
     /* Zero-copy: hand out the IQ where the DMA put it. The block stays ours until

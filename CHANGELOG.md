@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased — pluto_ctld: continuous GPS-timed stream
+
+- **`stream_start` / `stream_stop` / `stream_status`** (ICD §7b; `"stream"` in `caps`).
+  - **What it sends:** RX goes continuously to a receiver, one ZMQ PUSH message per DMA
+    block. Each message is the `services/iqwire.h` header (64 bytes plus 24-byte PPS,
+    GAIN and TX markers) followed by the ci16 samples, sent zero-copy.
+  - **Timing:** sample 0 of each epoch is latched on a PPS edge, and every later edge
+    becomes a marker at its counter tick, so the receiver can place any sample in GPS
+    time even with a drifting sample clock.
+  - **Loss:** an overflow, a lag past the queue or a refused send ends the epoch, and a
+    new one starts on the next edge. A gap never sits inside an epoch.
+  - **Coexistence:** `capture` is refused while streaming, and the xo lock is held.
+- From the `iq_stream` prototype (feat/iq-stream), now a thread in `pluto_ctld` (one
+  radio owner) with the binary header.
+- `capture_core` exports `capture_gate_hold/open` and `capture_lclk_multiple`, shared
+  with the stream.
+- CI installs `libzmq3-dev`, which `stream_core.c` needs.
+- **`tx_load` / `tx_start` / `tx_stop` / `tx_status`** (ICD §7c; `"tx"` in `caps`):
+  cyclic TX1 for the radar.
+  - **Order:** load, then `stream_start` at the same rate, then start.
+  - **Markers:** the start appears in the stream as `TX_START` (tick, buffer length) and
+    `TX_HASH`, restated at the first period boundary of every epoch.
+  - **Gate:** axi_tdd channel 2, the TX DMA's gate (arm-only sync), is held HIGH like
+    channel 1, so a cyclic buffer never starves.
+- **The AD9361 is put in FDD after every tune** (capture, stream, TX).
+  - **Incident:** another libiio client had left it in ALERT on node1, and every gated
+    capture came back at twice the rate, as constant DC ("finished 19.9 ms early").
+  - **Reported:** `ctl:ensm_was` in the meta, `ensm_was` in stream and TX status.
+- **Fixed: the `l_clk` multiple was misread for ~2 s after a rate change by a power of
+  two.** PPS_DELTA still counted the old rate, and that count is an exact multiple of the
+  new rate, so the 1000 ppm test passed it.
+  - **Seen on node1 by the radar:** `tx_load` at a new rate, then `stream_start` at once.
+    - 8 → 4 MS/s read multiple 4. The PPS frame was two seconds long, the window was
+      never released, and the start failed with `arm`.
+    - 4 → 8 MS/s read multiple 1. Each epoch ended on `lag` within a second, and
+      `TX_START` was placed with half the true multiple.
+  - **Fix:** every rate write in `pluto_ctld` goes through `capture_set_rate`, which
+    notes the change. Only a PPS_DELTA taken 2.1 s or more after it can set the multiple;
+    until then the last confirmed one is used. With none confirmed yet, `stream_start`
+    waits out the 2.1 s.
+  - Gated captures share the code, and were exposed the same way when a rate change
+    came less than a second before the next capture.
+- `stream_start` retries the first epoch's arm once (a missed PPS edge), and waits up to
+  15 s for the first block.
+- `tx_status` reports `underflows`: status reads that found the TX DMA had run dry since
+  the previous one. A dry cyclic DMA resumes late, which moves the waveform off its
+  `TX_START` phase. It stayed 0 on node1 at 4 and 12 MS/s with RX streaming.
+- **`tdd_status`** (ICD §7d; `"tdd_status"` in `caps`): the axi_tdd core's registers and,
+  per channel, the polarity `pluto_ctld` last latched.
+  - A sysfs polarity is only the register; it reaches the output at the next enable
+    0 → 1. The radar had to guess the gate's state through pyadi.
+  - The core is IIO `adi-iio-fakedev`, labeled `iio-axi-tdd-0`, not pyadi's
+    `axi-core-tdd`.
+- **TX latency default by rate:** 68.5 − 2.375 per MS/s, clamped to 4–12 MS/s (59 at 4,
+  50 at 8, 40 at 12), from the radar's direct-path measurements after the fix above.
+  `latency_samples` still overrides it.
+- **Verified by the radar on node1:**
+  - Back-to-back rate flips 4 → 8 and 8 → 4 MS/s started first time, with
+    `ticks_per_sample` 2 and no ended epochs.
+  - Markers landed −5 samples off at 8 MS/s and +5 at 4 MS/s, against the old constant
+    55.
+  - At 12 MS/s (45 MB/s) one epoch ran with no loss.
+
 ## v2.1.0 — ~1 s gated captures, correct arming, steadier xo discipline
 
 Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
