@@ -15,6 +15,14 @@
  * tick 0 is allowed), so any sample's GPS time follows from the two anchors around
  * it and a drifting sample clock costs nothing.
  *
+ * Dechirp (pluto_ctld stream_start "dechirp", the PL dechirp_decim block). The samples are
+ * the RX mixed with the running TX buffer and CIC3-decimated by D: sample_rate_hz is the
+ * output rate fs/D and ticks_per_sample is (ticks per input sample) x D. epoch_t0_ns and
+ * every marker tick still count from input sample 0, the PPS edge; output sample m
+ * covers input samples S0 + m*D .. S0 + m*D + D - 1, where S0 (a sweep start) comes in
+ * the epoch's DECIM_PHASE marker. So a tick maps to output samples as
+ * (tick / (ticks_per_sample / D) - S0) / D.
+ *
  * Loss. The radio never delivers a gap inside an epoch: on a DMA overflow (or a lag
  * longer than its queue) it drops the epoch and starts a new one on the next PPS
  * edge. The first block of the new epoch carries IQW_F_EPOCH_START, plus
@@ -42,6 +50,8 @@
 #define IQW_M_TX_START 2u   /* a cyclic TX buffer started; value = its length, samples */
 #define IQW_M_GAIN     3u   /* RX gain from this tick on; value = milli-dB (AGC: -1)  */
 #define IQW_M_TX_HASH  4u   /* the TX buffer that started here; value = 64-bit hash   */
+#define IQW_M_DECIM_PHASE 5u /* dechirp: output sample 0 is input sample S0 (a sweep
+                              * start) of the epoch; value = S0, tick = S0 x input tps   */
 
 typedef struct {
     uint32_t magic;            /* IQW_MAGIC                                          */

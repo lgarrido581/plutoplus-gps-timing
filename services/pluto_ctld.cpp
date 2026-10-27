@@ -37,6 +37,7 @@
 #include <string>
 
 #include "capture_core.h"
+#include "dechirp_pl.h"
 #include "stream_core.h"
 #include "tx_core.h"
 
@@ -139,14 +140,16 @@ static void send_error(void *sock, const std::string &msg) {
 //   tx           tx_load (+ ci16 frame) / tx_start / tx_stop / tx_status: cyclic TX1, its
 //                start marked in a running stream (iqwire TX_START / TX_HASH)
 //   tdd_status   the axi_tdd gate's registers and what this daemon last latched
+//   dechirp      stream_start takes a "dechirp" block: this bitstream has the PL
+//                dechirp_decim block (listed in /etc/plutoplus/pl_features, ID "DCDM")
 // max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
-    char b[320];
+    char b[352];
     snprintf(b, sizeof b,
              "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
              "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\",\"tx\","
-             "\"tdd_status\"],\"max_block_size\":%lld}",
-             API, now_unix(), capture_block_cap());
+             "\"tdd_status\"%s],\"max_block_size\":%lld}",
+             API, now_unix(), dcdm_probe(nullptr) ? ",\"dechirp\"" : "", capture_block_cap());
     send_one(sock, b);
 }
 
@@ -251,6 +254,7 @@ static void handle_capture(void *sock, const std::string &body) {
     }
 
     capture_result_t res;
+    dcdm_bypass();                   /* the raw path (a no-op without the PL block) */
     cap_lock_acquire();              /* pause xo_correct's rate-disturbing write */
     int rc = capture_run(&req, &res);
     cap_lock_release();
@@ -306,7 +310,7 @@ static void send_stream(void *sock, bool ok, const char *status) {
 }
 
 static void handle_stream(void *sock, void *zctx, const std::string &op, const std::string &body) {
-    char st[1024];
+    char st[2048];
     if (op == "stream_status") {
         stream_status(st, sizeof st);
         send_stream(sock, true, st);
@@ -334,6 +338,25 @@ static void handle_stream(void *sock, void *zctx, const std::string &op, const s
     req.channels = jnum(body, "channels", &v) ? (int)v : 1;
     req.block_ms = jnum(body, "block_ms", &v) ? v : 100.0;
     req.nblocks  = jnum(body, "blocks", &v) ? (int)v : 8;
+    // "dechirp": {"decim": D, "sweep_samples": N, "align_samples": A, "filter": "cic3"}
+    // (keys unique in the request, so the flat readers find them inside the object)
+    size_t dp = jpos(body, "dechirp");
+    if (dp != std::string::npos && body.compare(dp, 4, "null") != 0) {
+        if (body[dp] != '{' || !jnum(body, "decim", &v) || v < 1) {
+            send_error(sock, "dechirp needs {\"decim\", \"sweep_samples\", \"align_samples\"}");
+            return;
+        }
+        req.decim = (int)v;
+        if (!jnum(body, "sweep_samples", &v)) { send_error(sock, "dechirp: missing sweep_samples"); return; }
+        req.sweep_samples = (long long)v;
+        if (!jnum(body, "align_samples", &v)) { send_error(sock, "dechirp: missing align_samples"); return; }
+        req.align_samples = (int)v;
+        std::string filt = jstr(body, "filter");
+        if (!filt.empty() && filt != "cic3") {
+            send_error(sock, "dechirp: filter \"" + filt + "\" unknown (cic3 only)");
+            return;
+        }
+    }
     long long txr = tx_rate();
     if (txr > 0 && (txr > req.rate_hz + 2 || txr < req.rate_hz - 2)) {   // RX and TX share the rate
         char m[160];
@@ -449,6 +472,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     fprintf(stderr, "pluto_ctld: REP %s (capture-control)\n", ep.c_str());
+    dcdm_info_t dci;
+    if (dcdm_probe(&dci)) {
+        dcdm_bypass();               // the raw path until a dechirp stream asks otherwise
+        fprintf(stderr, "pluto_ctld: PL dechirp_decim at 0x%08X, VERSION 0x%08X (D up to %d)\n",
+                dci.base, dci.version, 1 << dci.max_log2d);
+    } else {
+        fprintf(stderr, "pluto_ctld: no PL dechirp_decim (%s)\n", dci.why);
+    }
 
     while (!g_stop) {
         zmq_msg_t m;
@@ -504,7 +535,7 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "pluto_ctld: shutting down\n");
     if (stream_running()) {
-        char st[1024];
+        char st[2048];
         stream_stop(st, sizeof st);
     }
     if (tx_loaded()) {

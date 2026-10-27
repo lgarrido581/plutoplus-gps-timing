@@ -37,6 +37,8 @@ static struct {
     unsigned            gen;
     unsigned            underflows;   /* tx_status reads that found the DAC had run dry */
     char                ensm_was[32];
+    uint32_t            pat0, pat1;   /* the buffer's words 0 and 1 */
+    size_t              pat_period;   /* where the pair recurs (tx_sweep_pattern), 0 = irregular */
 } T = { .mu = PTHREAD_MUTEX_INITIALIZER };
 
 static uint64_t fnv1a64(const void *p, size_t n) {
@@ -44,6 +46,21 @@ static uint64_t fnv1a64(const void *p, size_t n) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
     return h;
+}
+
+/* The spacing P at which the pair (w[0], w[1]) occurs in the cyclic buffer, when it
+ * occurs at 0, P, 2P, ... and nowhere else (P divides n); 0 otherwise. The pair is
+ * checked across the wrap too, since the DAC plays the buffer back to back. */
+static size_t pair_period(const uint32_t *w, size_t n) {
+    size_t p = 0, hits = 0;
+    for (size_t i = 1; i < n; i++) {
+        if (w[i] != w[0] || w[(i + 1) % n] != w[1]) continue;
+        if (p == 0) p = i;
+        if (i % p != 0) return 0;
+        hits++;
+    }
+    if (p == 0) p = n;
+    return (n % p == 0 && hits == n / p - 1) ? p : 0;
 }
 
 int tx_default_latency(long long rate_hz) {
@@ -132,6 +149,9 @@ int tx_load(const tx_req_t *req, const void *iq, size_t bytes, char *err, size_t
     T.gain_db = req->gain_db;
     T.latency = req->latency_samples >= 0 ? req->latency_samples : tx_default_latency(fs);
     T.hash = fnv1a64(iq, bytes);
+    memcpy(&T.pat0, iq, 4);
+    memcpy(&T.pat1, (const unsigned char *)iq + 4, 4);
+    T.pat_period = pair_period((const uint32_t *)iq, T.nsamp);
     T.running = 0;
     T.underflows = 0;
     pthread_mutex_unlock(&T.mu);
@@ -206,6 +226,22 @@ long long tx_rate(void) {
     long long r = T.buf ? T.rate_hz : 0;
     pthread_mutex_unlock(&T.mu);
     return r;
+}
+
+int tx_sweep_pattern(uint32_t *w0, uint32_t *w1, uint64_t *period, uint64_t *len,
+                     long long *rate_hz, int *running) {
+    pthread_mutex_lock(&T.mu);
+    int l = T.buf != NULL;
+    if (l) {
+        *w0 = T.pat0;
+        *w1 = T.pat1;
+        *period = T.pat_period;
+        *len = T.nsamp;
+        *rate_hz = T.rate_hz;
+        *running = T.running;
+    }
+    pthread_mutex_unlock(&T.mu);
+    return l;
 }
 
 int tx_start_info(uint32_t *live_after, int *latency_samples, uint64_t *len,

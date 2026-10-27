@@ -10,10 +10,14 @@
  *   so the DMA free-runs) -> one message per block until stop or a loss.
  * Time: the stream counts the pps_counter's clock from the latched start; each PPS edge
  * becomes a marker at its tick, so the receiver can place any sample in GPS time.
+ * Dechirp: the PL block is configured and enabled once, before the first arm. Every sync
+ * edge re-arms it (dechirp_decim 1.1+), so each epoch's output starts at the first sweep
+ * start after its edge and S0 counts from that edge (DECIM_PHASE marker).
  */
 #define _GNU_SOURCE
 #include "stream_core.h"
 #include "capture_core.h"
+#include "dechirp_pl.h"
 #include "iqwire.h"
 #include "pps_timestamp.h"
 #include "tx_core.h"
@@ -43,6 +47,7 @@
 #define SEND_CEILING_BPS 56e6      /* measured: the Pluto+'s GbE send tops out near 57 MB/s */
 #define SEND_STALL_MS 5000         /* a block not sent this long ends the epoch */
 #define SEND_HOLD_MS 30000         /* how long teardown waits for zmq to let go of a block */
+#define ALIGN_MAX 4094             /* dechirp_decim's replica delay line */
 
 enum { ST_IDLE, ST_ARMING, ST_STREAMING, ST_FAILED };
 static const char *STATE_NAME[] = { "idle", "arming", "streaming", "failed" };
@@ -65,6 +70,8 @@ typedef struct {
     char            ensm_was[32];     /* the AD9361 state found at start (fdd expected) */
     unsigned        epoch;
     long long       epoch_sec;
+    int             decim;            /* 1 raw; D with the PL dechirp */
+    uint32_t        s0;               /* dechirp: this epoch's DECIM_PHASE */
     unsigned long long epochs, blocks, samples, bytes, ends[N_END];
 } stream_t;
 
@@ -91,6 +98,7 @@ typedef struct {
     int                 have_last;
     uint32_t            last_live;    /* LIVE and ticks-since-sample-0 at the last block */
     uint64_t            last_cnt64;
+    int                 decim;        /* 1 raw; D with the PL dechirp */
 } sess_t;
 
 static double realtime_s(void) {
@@ -178,7 +186,8 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
     double settle = capture_rate_settle_left(cur);
     if (settle > 0.0 && !capture_lclk_known()) usleep((useconds_t)(settle * 1e6));
     int mult = capture_lclk_multiple(cur, s->pps.regs[R_PPS_DELTA]);
-    double bps = (double)r->rate_hz * r->channels * 4.0;
+    s->decim = r->decim > 0 ? r->decim : 1;
+    double bps = (double)r->rate_hz / s->decim * r->channels * 4.0;
     if (bps > SEND_CEILING_BPS) {
         snprintf(err, el, "%.1f MB/s exceeds the Pluto's send ceiling (~%.0f MB/s)",
                  bps / 1e6, SEND_CEILING_BPS / 1e6);
@@ -216,8 +225,15 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
 
     s->frame_len = (long long)mult * r->rate_hz;
     s->win = s->frame_len / 2;
-    s->n_blk = (size_t)((double)r->rate_hz * r->block_ms / 1000.0) & ~(size_t)1023;
+    s->n_blk = (size_t)((double)r->rate_hz / s->decim * r->block_ms / 1000.0) & ~(size_t)1023;
     if (s->n_blk < 1024) { snprintf(err, el, "block_ms too short for this rate"); return -1; }
+    if (r->decim > 0) {
+        if (dcdm_configure(r->log2d, (uint32_t)r->sweep_samples, (uint32_t)r->align_samples,
+                           r->pat0, r->pat1, err, el) != 0) return -1;
+        dcdm_enable(1);           /* every sync edge re-arms it: once is enough */
+    } else {
+        dcdm_bypass();            /* the raw path, whatever a crashed run left behind */
+    }
 
     s->push = zmq_socket(g.zctx, ZMQ_PUSH);
     int linger = 0, hwm = 2, immediate = 1;
@@ -237,6 +253,7 @@ static int setup(sess_t *s, const stream_req_t *r, char *err, size_t el) {
 
     pthread_mutex_lock(&g.mu);
     g.fs = (double)fs; g.fc = (double)fc; g.mult = mult; g.block_samples = (int)s->n_blk;
+    g.decim = s->decim;
     g.xo_locked = xo_locked();
     snprintf(g.ensm_was, sizeof g.ensm_was, "%s", ensm_was);
     pthread_mutex_unlock(&g.mu);
@@ -268,6 +285,7 @@ static void teardown(sess_t *s) {
     if (s->pfd[0] >= 0) { close(s->pfd[0]); close(s->pfd[1]); }
     if (s->have_pps) pps_ts_close(&s->pps);
     if (s->ctx) iio_context_destroy(s->ctx);
+    dcdm_bypass();
     unlink(LOCK_PATH);
 }
 
@@ -277,6 +295,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
                      int prev_end, int *started, char *err, size_t el) {
     *started = 0;
     const int mult = g.mult;
+    const int dechirp = r->decim > 0;
     struct iio_device *rx = s->rx;
     int gh = capture_gate_hold(s->ctx);
     if (gh != 0) {
@@ -321,7 +340,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         return END_ARM;
     }
 
-    uint32_t lc = 0, lseq = 0, live_prev = 0, pseq_prev = 0, start_pseq = 0;
+    uint32_t lc = 0, lseq = 0, live_prev = 0, pseq_prev = 0, start_pseq = 0, s0 = 0;
     uint64_t lgps = 0, cnt64 = 0;
     long long start_sec = 0;
     unsigned long long k = 0;
@@ -331,7 +350,11 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         int last = g.stop;
         ssize_t nb = iio_buffer_refill(s->buf);
         if (nb <= 0) {
-            snprintf(err, el, "refill failed (%zd) at block %llu", nb, k);
+            if (dechirp && k == 0)
+                snprintf(err, el, "dechirp: no sweep start in the TX replica (refill %zd; TX "
+                         "running? PAT0 0x%08X PAT1 0x%08X)", nb, r->pat0, r->pat1);
+            else
+                snprintf(err, el, "refill failed (%zd) at block %llu", nb, k);
             end = k == 0 ? END_NOEDGE : END_REFILL;
             break;
         }
@@ -356,10 +379,25 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
             ovf = 0;      /* the ADC overflowed while the DMA waited for the edge: expected */
             if (s->tx_known && s->have_last)   /* re-base TX's start on this epoch's sample 0 */
                 s->tx_tick -= (int64_t)(s->last_cnt64 + (uint32_t)(lc - s->last_live));
+            if (dechirp) {
+                dcdm_state_t ds;
+                dcdm_read(&ds);
+                if (!ds.running) {
+                    snprintf(err, el, "dechirp: blocks arrived but the block is not running");
+                    end = END_NOEDGE;
+                    break;
+                }
+                s0 = ds.s0;
+                pthread_mutex_lock(&g.mu);
+                g.s0 = s0;
+                pthread_mutex_unlock(&g.mu);
+            }
         }
         cnt64 += (uint32_t)(live - live_prev);
         live_prev = live;
-        double lag = (double)cnt64 / mult - (double)((k + 1) * s->n_blk);
+        /* output samples due by now: input samples since the edge, less the partial sweep
+         * the dechirp dropped, over D */
+        double lag = ((double)cnt64 / mult - (double)s0) / s->decim - (double)((k + 1) * s->n_blk);
         if (ovf) { snprintf(err, el, "DMA overflow at block %llu", k); end = END_OVERFLOW; break; }
         if (lag > (double)(r->nblocks + 1) * (double)s->n_blk) {
             snprintf(err, el, "lag %.0f samples past the %d-block queue at block %llu",
@@ -375,6 +413,10 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         memset(hb, 0, sizeof hb);
         if (k == 0) {
             mk[nm].tick = 0; mk[nm].value = s->gain_mdb; mk[nm].kind = IQW_M_GAIN; nm++;
+            if (dechirp) {
+                mk[nm].tick = (uint64_t)s0 * (uint64_t)mult; mk[nm].value = s0;
+                mk[nm].kind = IQW_M_DECIM_PHASE; nm++;
+            }
         }
         if (pseq != pseq_prev) {
             mk[nm].tick = cnt64 - (uint32_t)(live - ppsc);       /* ticks since sample 0 */
@@ -435,8 +477,8 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         h->sample0 = k * s->n_blk;
         h->nsamples = (uint32_t)((size_t)nb / (4u * (unsigned)r->channels));
         h->n_markers = (uint16_t)nm;
-        h->ticks_per_sample = (uint16_t)mult;
-        h->sample_rate_hz = g.fs;
+        h->ticks_per_sample = (uint16_t)(mult * s->decim);
+        h->sample_rate_hz = g.fs / s->decim;
         h->center_freq_hz = g.fc;
         h->epoch_t0_ns = lgps;
         if (zmq_send(s->push, hb, h->hdr_bytes, ZMQ_SNDMORE | ZMQ_DONTWAIT) < 0) {
@@ -473,7 +515,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         g.blocks++;
         g.samples += h->nsamples;
         g.bytes += (unsigned long long)nb;
-        g.lag_s = lag / g.fs;
+        g.lag_s = lag * s->decim / g.fs;
         if (g.lag_s > g.max_lag_s) g.max_lag_s = g.lag_s;
         pthread_mutex_unlock(&g.mu);
         *started = 1;
@@ -553,6 +595,60 @@ int stream_running(void) {
     return g.thread_live;
 }
 
+/* A dechirp request against the PL block and the loaded TX buffer; fills log2d, pat0/1. */
+static int dechirp_check(stream_req_t *r, char *err, size_t el) {
+    dcdm_info_t inf;
+    if (!dcdm_probe(&inf)) {
+        snprintf(err, el, "dechirp: this bitstream has no PL dechirp_decim block (%s)", inf.why);
+        return -1;
+    }
+    int k = 0;
+    while (k <= inf.max_log2d && (1 << k) != r->decim) k++;
+    if (k > inf.max_log2d) {
+        snprintf(err, el, "dechirp: decim %d is not a power of two in 1..%d", r->decim,
+                 1 << inf.max_log2d);
+        return -1;
+    }
+    if (r->channels != 1) {
+        snprintf(err, el, "dechirp: channels must be 1");
+        return -1;
+    }
+    uint32_t w0 = 0, w1 = 0;
+    uint64_t period = 0, len = 0;
+    long long txr = 0;
+    int running = 0;
+    if (!tx_sweep_pattern(&w0, &w1, &period, &len, &txr, &running) || !running ||
+        txr > r->rate_hz + 2 || txr < r->rate_hz - 2) {
+        snprintf(err, el, "dechirp: needs TX loaded and started at this rate first "
+                 "(tx_load, tx_start, then stream_start)");
+        return -1;
+    }
+    if (r->sweep_samples < r->decim || r->sweep_samples >= (1LL << 24) ||
+        r->sweep_samples % r->decim != 0) {
+        snprintf(err, el, "dechirp: sweep_samples %lld must be a multiple of decim %d below "
+                 "2^24", r->sweep_samples, r->decim);
+        return -1;
+    }
+    if (period != (uint64_t)r->sweep_samples) {
+        if (period == 0)
+            snprintf(err, el, "dechirp: the TX buffer's first two words also occur off its "
+                     "sweep starts (the PL detector needs identical sweeps)");
+        else
+            snprintf(err, el, "dechirp: the TX buffer's first two words recur every %llu "
+                     "samples, not every sweep_samples %lld", (unsigned long long)period,
+                     r->sweep_samples);
+        return -1;
+    }
+    if (r->align_samples < 0 || r->align_samples > ALIGN_MAX) {
+        snprintf(err, el, "dechirp: align_samples must be 0..%d", ALIGN_MAX);
+        return -1;
+    }
+    r->log2d = k;
+    r->pat0 = w0;
+    r->pat1 = w1;
+    return 0;
+}
+
 int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) {
     reap();
     if (g.thread_live) { snprintf(err, errlen, "already streaming"); return -1; }
@@ -563,8 +659,10 @@ int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) 
                  "channels 1|2, block_ms 10..300, blocks 2..32)");
         return -1;
     }
+    stream_req_t rq = *req;
+    if (rq.decim > 0 && dechirp_check(&rq, err, errlen) != 0) return -1;
     pthread_mutex_lock(&g.mu);
-    g.req = *req;
+    g.req = rq;
     g.zctx = zctx;
     g.stop = 0;
     g.exited = 0;
@@ -572,6 +670,8 @@ int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) 
     g.err[0] = '\0';
     g.t_start = realtime_s();
     g.epochs = g.blocks = g.samples = g.bytes = 0;
+    g.decim = rq.decim > 0 ? rq.decim : 1;
+    g.s0 = 0;
     memset(g.ends, 0, sizeof g.ends);
     g.lag_s = g.max_lag_s = 0.0;
     pthread_mutex_unlock(&g.mu);
@@ -616,7 +716,29 @@ void stream_status(char *json, size_t len) {
     json_text(e, sizeof e, g.err);
     json_text(c, sizeof c, g.req.connect);
     double up = realtime_s() - g.t_start;
-    double secs = g.fs > 0 ? (double)g.samples / g.fs : 0.0;
+    int d = g.decim > 0 ? g.decim : 1;
+    double secs = g.fs > 0 ? (double)g.samples * d / g.fs : 0.0;
+    char dc[400] = "null";
+    if (g.req.decim > 0) {
+        dcdm_state_t ds;
+        memset(&ds, 0, sizeof ds);
+        dcdm_read(&ds);
+        uint32_t l1; int lat; uint64_t tl, th; unsigned tg;
+        int txr = tx_start_info(&l1, &lat, &tl, &th, &tg);
+        unsigned per = (unsigned)(g.req.sweep_samples / d);
+        int healthy = ds.running && ds.locked && ds.period == (uint32_t)g.req.sweep_samples &&
+                      ds.outs_per_sweep == per && txr;
+        snprintf(dc, sizeof dc,
+            "{\"decim\":%d,\"sweep_samples\":%lld,\"align_samples\":%d,\"s0\":%u,"
+            "\"healthy\":%s,\"locked\":%s,\"running\":%s,\"period\":%u,"
+            "\"outputs_per_sweep\":%u,\"period_err\":%u,\"saturated\":%s,"
+            "\"sat_count\":%u,\"tx_running\":%s,\"pat0\":\"0x%08X\",\"pat1\":\"0x%08X\"}",
+            g.req.decim, g.req.sweep_samples, g.req.align_samples, g.s0,
+            healthy ? "true" : "false", ds.locked ? "true" : "false",
+            ds.running ? "true" : "false", ds.period, ds.outs_per_sweep, ds.period_err,
+            ds.saturated ? "true" : "false", ds.sat_count, txr ? "true" : "false",
+            g.req.pat0, g.req.pat1);
+    }
     snprintf(json, len,
         "{\"state\":\"%s\",\"connect\":\"%s\",\"sample_rate_hz\":%.0f,\"center_freq_hz\":%.0f,"
         "\"channels\":%d,\"block_samples\":%d,\"blocks_queued\":%d,\"ticks_per_sample\":%d,"
@@ -624,13 +746,13 @@ void stream_status(char *json, size_t len) {
         "\"MBps\":%.2f,\"lag_ms\":%.1f,\"max_lag_ms\":%.1f,\"xo_locked_at_start\":%s,"
         "\"ensm_was\":\"%s\","
         "\"ended\":{\"overflow\":%llu,\"lag\":%llu,\"send\":%llu,\"refill\":%llu,\"arm\":%llu,"
-        "\"no_edge\":%llu},\"error\":\"%s\"}",
-        STATE_NAME[g.state], c, g.fs, g.fc, g.req.channels, g.block_samples,
-        g.req.nblocks, g.mult, g.epoch, g.epochs, g.epoch_sec, g.blocks, secs,
+        "\"no_edge\":%llu},\"dechirp\":%s,\"error\":\"%s\"}",
+        STATE_NAME[g.state], c, g.fs / d, g.fc, g.req.channels, g.block_samples,
+        g.req.nblocks, g.mult * d, g.epoch, g.epochs, g.epoch_sec, g.blocks, secs,
         up > 0 ? (double)g.bytes / up / 1e6 : 0.0, g.lag_s * 1e3, g.max_lag_s * 1e3,
         g.xo_locked ? "true" : "false", g.ensm_was[0] ? g.ensm_was : "unknown",
         g.ends[END_OVERFLOW], g.ends[END_LAG],
-        g.ends[END_SEND], g.ends[END_REFILL], g.ends[END_ARM], g.ends[END_NOEDGE], e);
+        g.ends[END_SEND], g.ends[END_REFILL], g.ends[END_ARM], g.ends[END_NOEDGE], dc, e);
     pthread_mutex_unlock(&g.mu);
 }
 

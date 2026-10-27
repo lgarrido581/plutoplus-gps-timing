@@ -67,6 +67,8 @@ Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
   - `start_check` — `ctl:start_check_ms` / `ctl:start_edge_latched` are in the meta.
   - `stream`, `tx` — §7b and §7c.
   - `tdd_status` — §7d.
+  - `dechirp` — §7e: this bitstream has the PL `dechirp_decim` block, so `stream_start`
+    takes a `dechirp` block. Absent on bitstreams without it.
 - `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
   `samples × 4` must fit in it.
 
@@ -334,7 +336,8 @@ The status object holds:
 - **counters:** `epoch`, `epochs`, `epoch_t0_s`, `blocks`, `seconds`, `MBps`, `lag_ms`,
   `max_lag_ms`, `xo_locked_at_start`;
 - **endings:** `ended` counts epochs by reason (`overflow`, `lag`, `send`, `refill`,
-  `arm`, `no_edge`), with the last `error`.
+  `arm`, `no_edge`), with the last `error`;
+- **dechirp:** `null`, or the PL block's state for a dechirp stream (§7e).
 
 **Epochs.** Sample 0 of an epoch is latched in hardware on a PPS edge (`epoch_t0_ns`,
 about +100 ns), as in a gated capture. The DMA then free-runs, and every later PPS edge
@@ -452,6 +455,93 @@ Request `tdd_status` (or `{"op":"tdd_status"}`). Reply, one frame:
   now. −1 means none since `pluto_ctld` started.
 - **Other clients:** a client that toggles `enable` itself makes `latched` stale. The
   example above is the idle state `pluto_ctld` leaves, with RX and TX gates both HIGH.
+
+## 7e. PL dechirp — `stream_start` with `dechirp`
+
+Advertised by `"dechirp"` in `ping`'s `caps`, only on a bitstream built with the
+`dechirp_decim` HDL overlay. The block sits between the AD9361 core's RX output and the RX
+DMA:
+- **Dechirp:** it multiplies each RX sample by the conjugate of the TX word the DAC sent
+  `align_samples + 1` strobes earlier.
+- **Decimation:** a CIC3 decimates by D = 2^k, with its state zeroed at every sweep start.
+- **Sweep starts:** a start is where the replica's words (n−1, n) equal the loaded TX
+  buffer's words 0 and 1.
+
+So the DMA, and the stream, carry fs/D sweep-aligned ci16 beat samples. The register map
+and arithmetic are in `services/dechirp_pl.h`; the design is radar-stack
+`docs/PL_DECHIRP_DECIM.md`.
+
+**Bypass.** At power-up the block is a wire. `pluto_ctld` holds it there at start, before
+every `capture`, for every raw stream and at the end of every stream (any exit path), so
+captures and raw streams see the stock path.
+
+**Presence.** The block is touched only when `/etc/plutoplus/pl_features` (packed into the
+same FIT as the bitstream) lists `dechirp_decim 0x7C470000 v1`, and its ID register then
+reads `0x4443444D` ("DCDM") with VERSION 1.1 or later (the sync-edge re-arm). A read of
+an unmapped AXI address aborts, so nothing probes it blindly.
+
+```json
+{"op":"stream_start","connect":"tcp://192.168.50.20:5563","freq_hz":5.8e9,
+ "sample_rate_hz":30720000,"channels":1,"block_ms":100,"blocks":8,
+ "dechirp":{"decim":16,"sweep_samples":12288,"align_samples":100,"filter":"cic3"}}
+```
+| field | meaning |
+|---|---|
+| `decim` | D, a power of two from 1 up to 2^(VERSION's max log2 D) (32) |
+| `sweep_samples` | input samples per sweep: a multiple of D, below 2^24 |
+| `align_samples` | the replica delay beyond one DAC strobe, 0–4094; calibrate it with the direct path (it isn't TX's `latency_samples`) |
+| `filter` | `"cic3"`, the only one (optional) |
+
+**Order:** `tx_load` → `tx_start` → `stream_start`, the reverse of the raw cycle (§7c). The
+block emits nothing until the replica shows a sweep start. `stream_start` refuses:
+- no `dechirp` cap;
+- TX not loaded and running at the stream's rate;
+- `channels` other than 1;
+- an out-of-range field;
+- a TX buffer whose words 0 and 1 also occur anywhere other than k·`sweep_samples`
+  (checked cyclically at `tx_load`). A zero guard at the sweep start, or per-sweep
+  coding, would give false starts or none. The buffer must be identical sweeps.
+
+**Configuration.** With the block disabled, `pluto_ctld`:
+1. soft-resets it;
+2. writes DECIM, SWEEP_LEN, ALIGN, PAT0 and PAT1 (TX words 0 and 1 exactly as loaded:
+   I in bits 15..0, Q in 31..16) and reads each back;
+3. clears bypass and sets enable, once, before the first arm.
+
+Every rising edge of the RX-DMA sync re-arms the block:
+- the output is gated and the pipeline cleared;
+- the next sweep start re-latches S0.
+
+So each epoch's DMA sample 0 is a sweep start of that epoch.
+
+**The stream.** The header and markers change as follows:
+- `sample_rate_hz` = fs/D, and `ticks_per_sample` = (ticks per input sample) × D.
+- `epoch_t0_ns` and every marker `tick` still count from input sample 0, the PPS edge.
+- Each epoch's first block carries a `DECIM_PHASE` marker (kind 5) with
+  `tick` = S0 × input ticks per sample and `value` = S0.
+- Output sample m covers input samples S0 + m·D … S0 + m·D + D − 1. A tick maps to output
+  samples as `(tick / (ticks_per_sample / D) − S0) / D`.
+- The ~56 MB/s send ceiling applies to the output rate.
+- `TX_START`/`TX_HASH` are still sent when TX's start can be placed (§7c); the sweep phase
+  comes from `DECIM_PHASE`.
+
+`stream_status`'s `dechirp` object:
+```json
+{"decim":16,"sweep_samples":12288,"align_samples":100,"s0":4711,"healthy":true,
+ "locked":true,"running":true,"period":12288,"outputs_per_sweep":768,"period_err":0,
+ "saturated":false,"sat_count":0,"tx_running":true,"pat0":"0x00007213","pat1":"0x0A1F7101"}
+```
+- `s0` — this epoch's DECIM_PHASE.
+- `locked` — the detector's last measured `period` equals `sweep_samples`.
+- `outputs_per_sweep` — as the block counted it.
+- `healthy` — all of: `running`, `locked`, `period` = `sweep_samples`,
+  `outputs_per_sweep` = `sweep_samples`/D, and TX running.
+- `period_err` — sweep starts that came off schedule since the configuration. A dropped or
+  repeated DAC sample counts here; the block re-phases on the next match.
+- `saturated`, `sat_count` — product or output saturations.
+
+`tx_stop` during a dechirp stream is allowed, but the output then has no replica
+(`healthy` false).
 
 ## 8. Security
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### pluto_ctld: PL dechirp streams
+
+- **`stream_start` with `dechirp`** (ICD §7e; `"dechirp"` in `caps`). It needs a bitstream
+  with the `dechirp_decim` HDL overlay: no bitstream in a release has it yet.
+  - **What it does:** the PL mixes RX with the running TX buffer and CIC3-decimates by D.
+    The stream carries fs/D sweep-aligned samples, with `sample_rate_hz` and
+    `ticks_per_sample` scaled and a `DECIM_PHASE` marker (iqwire kind 5) in every epoch.
+  - **Safety:** the block is touched only when `/etc/plutoplus/pl_features` lists it and
+    its ID reads "DCDM" (VERSION 1.1+). Bypass is restored at daemon start, before every
+    capture, for raw streams and on every stream exit.
+  - **Refusals:** the order is `tx_load` → `tx_start` → `stream_start`, one channel, and
+    the TX buffer's words 0 and 1 may occur only at sweep starts (checked at `tx_load`).
+  - **Status:** `stream_status` gains a `dechirp` object (S0, locked, period,
+    `period_err`, saturation, `healthy`).
+
 ## v2.2.0 — continuous GPS-timed stream, cyclic TX, gate and rate-change fixes
 
 Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
