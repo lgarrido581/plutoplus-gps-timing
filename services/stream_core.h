@@ -36,7 +36,8 @@ typedef struct {
     /* PL dechirp: decim = D (a power of two) asks for it, 0 = the raw samples */
     int       decim;
     long long sweep_samples; /* input samples per sweep; the TX buffer is whole sweeps */
-    int       align_samples; /* replica delay beyond one DAC strobe, 0..4094 */
+    int       align_samples; /* replica delay beyond one DAC strobe, 0..4094; < 0 =
+                              * dcdm_default_align(rate) */
     /* filled by stream_start from the loaded TX buffer */
     int       log2d;
     unsigned  pat0, pat1;

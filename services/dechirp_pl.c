@@ -158,6 +158,13 @@ static uint32_t rd2(int r) {
     return a;
 }
 
+int dcdm_default_align(long long rate_hz) {
+    double ms = (double)rate_hz / 1e6;
+    if (ms <= 12.0) return 44;
+    if (ms >= 30.72) return 42;
+    return (int)(44.0 - 2.0 * (ms - 12.0) / (30.72 - 12.0) + 0.5);
+}
+
 int dcdm_read(dcdm_state_t *st) {
     if (!dcdm_probe(NULL)) return -1;
     uint32_t s = rd2(R_STATUS);

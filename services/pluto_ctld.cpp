@@ -339,18 +339,19 @@ static void handle_stream(void *sock, void *zctx, const std::string &op, const s
     req.block_ms = jnum(body, "block_ms", &v) ? v : 100.0;
     req.nblocks  = jnum(body, "blocks", &v) ? (int)v : 8;
     // "dechirp": {"decim": D, "sweep_samples": N, "align_samples": A, "filter": "cic3"}
+    // (align_samples optional: the measured default for the rate)
     // (keys unique in the request, so the flat readers find them inside the object)
     size_t dp = jpos(body, "dechirp");
     if (dp != std::string::npos && body.compare(dp, 4, "null") != 0) {
         if (body[dp] != '{' || !jnum(body, "decim", &v) || v < 1) {
-            send_error(sock, "dechirp needs {\"decim\", \"sweep_samples\", \"align_samples\"}");
+            send_error(sock, "dechirp needs {\"decim\", \"sweep_samples\"[, \"align_samples\"]}");
             return;
         }
         req.decim = (int)v;
         if (!jnum(body, "sweep_samples", &v)) { send_error(sock, "dechirp: missing sweep_samples"); return; }
         req.sweep_samples = (long long)v;
-        if (!jnum(body, "align_samples", &v)) { send_error(sock, "dechirp: missing align_samples"); return; }
-        req.align_samples = (int)v;
+        req.align_samples = jnum(body, "align_samples", &v) ? (int)v : -1;
+        if (req.align_samples < -1) { send_error(sock, "dechirp: align_samples must be 0..4094"); return; }
         std::string filt = jstr(body, "filter");
         if (!filt.empty() && filt != "cic3") {
             send_error(sock, "dechirp: filter \"" + filt + "\" unknown (cic3 only)");

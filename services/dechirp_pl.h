@@ -85,6 +85,12 @@ void dcdm_bypass(void);
 /* Read the status registers. -1 without the block. */
 int  dcdm_read(dcdm_state_t *st);
 
+/* ALIGN when a client gives none: the DAC-tap-to-RX loop in input samples, through the
+ * AD9361's digital chains, so a sample count rather than a time. Measured on node1
+ * (Pluto+, 2r2t) with the direct path, 2026-10-27: 44 at 4 and 12 MS/s, 42 at 30.72;
+ * linear between, held outside. */
+int  dcdm_default_align(long long rate_hz);
+
 #ifdef __cplusplus
 }
 #endif

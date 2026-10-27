@@ -489,8 +489,23 @@ an unmapped AXI address aborts, so nothing probes it blindly.
 |---|---|
 | `decim` | D, a power of two from 1 up to 2^(VERSION's max log2 D) (32) |
 | `sweep_samples` | input samples per sweep: a multiple of D, below 2^24 |
-| `align_samples` | the replica delay beyond one DAC strobe, 0–4094; calibrate it with the direct path (it isn't TX's `latency_samples`) |
+| `align_samples` | the replica delay beyond one DAC strobe, 0–4094 (optional; below) |
 | `filter` | `"cic3"`, the only one (optional) |
+
+**`align_samples`** is the loop from the block's DAC tap to its RX input, in input
+samples. It runs through the AD9361's digital chains, so it's a sample count, not a time,
+and it isn't TX's `latency_samples`. Calibrate it with the direct path: in a beat sweep
+the direct path is a tone at slope × residual delay, and the right ALIGN puts it in bin 0.
+Measured on node1 (Pluto+, 2r2t), 2026-10-27:
+
+| rate | ALIGN |
+|---|---|
+| 4 MS/s | 44 |
+| 12 MS/s | 44 |
+| 30.72 MS/s | 42 |
+
+If the request omits it, `pluto_ctld` uses this table, linear between the points and held
+outside them; `stream_status` reports the value used.
 
 **Order:** `tx_load` → `tx_start` → `stream_start`, the reverse of the raw cycle (§7c). The
 block emits nothing until the replica shows a sweep start. `stream_start` refuses:
@@ -542,6 +557,14 @@ So each epoch's DMA sample 0 is a sweep start of that epoch.
 
 `tx_stop` during a dechirp stream is allowed, but the output then has no replica
 (`healthy` false).
+
+**Measured on node1** (2026-10-27, the radar's dechirp image, the radar's direct path at
+5.8 GHz):
+- **4 MS/s, D = 8 and 16:** `healthy`, locked, `period_err` 0. The direct path is in
+  bin 0 with ALIGN 44.
+- **12 MS/s, D = 4:** the dechirped direct path is within 0.5 samples of the raw path's.
+- **30.72 MS/s, D = 16:** the radar's tracker runs live on the stream (ws-fmcw-5800,
+  5.8 m cells).
 
 ## 8. Security
 

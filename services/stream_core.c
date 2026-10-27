@@ -639,7 +639,8 @@ static int dechirp_check(stream_req_t *r, char *err, size_t el) {
                      r->sweep_samples);
         return -1;
     }
-    if (r->align_samples < 0 || r->align_samples > ALIGN_MAX) {
+    if (r->align_samples < 0) r->align_samples = dcdm_default_align(r->rate_hz);
+    if (r->align_samples > ALIGN_MAX) {
         snprintf(err, el, "dechirp: align_samples must be 0..%d", ALIGN_MAX);
         return -1;
     }

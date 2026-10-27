@@ -16,6 +16,10 @@
     the TX buffer's words 0 and 1 may occur only at sweep starts (checked at `tx_load`).
   - **Status:** `stream_status` gains a `dechirp` object (S0, locked, period,
     `period_err`, saturation, `healthy`).
+  - **ALIGN:** `align_samples` is optional. The default comes from the loop measured on
+    node1: 44 samples at 4 and 12 MS/s, 42 at 30.72 MS/s.
+  - **Verified on node1:** with the radar's image, at 4, 12 and 30.72 MS/s; the radar's
+    tracker runs live on the dechirped stream.
 
 ## v2.2.0 — continuous GPS-timed stream, cyclic TX, gate and rate-change fixes
 
