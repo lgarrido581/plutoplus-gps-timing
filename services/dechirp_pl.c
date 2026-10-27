@@ -159,10 +159,14 @@ static uint32_t rd2(int r) {
 }
 
 int dcdm_default_align(long long rate_hz) {
+    static const double pts[3][2] = { { 4.0, 44.0 }, { 12.0, 45.0 }, { 30.72, 46.0 } };
     double ms = (double)rate_hz / 1e6;
-    if (ms <= 12.0) return 44;
-    if (ms >= 30.72) return 42;
-    return (int)(44.0 - 2.0 * (ms - 12.0) / (30.72 - 12.0) + 0.5);
+    if (ms <= pts[0][0]) return (int)pts[0][1];
+    for (int i = 1; i < 3; i++)
+        if (ms <= pts[i][0])
+            return (int)(pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * (ms - pts[i - 1][0]) /
+                         (pts[i][0] - pts[i - 1][0]) + 0.5);
+    return (int)pts[2][1];
 }
 
 int dcdm_read(dcdm_state_t *st) {
