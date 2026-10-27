@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased — pluto_ctld: continuous GPS-timed stream
+## v2.2.0 — continuous GPS-timed stream, cyclic TX, gate and rate-change fixes
+
+Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256
+`4c80a8c4…d87d0f`, unchanged since v2.0.4), so this release does not re-synthesize. Pluto+
+only: LibreSDR stays on v2.0.4 until it can be smoke-tested on that board.
+
+### pluto_ctld: continuous GPS-timed stream
 
 - **`stream_start` / `stream_stop` / `stream_status`** (ICD §7b; `"stream"` in `caps`).
   - **What it sends:** RX goes continuously to a receiver, one ZMQ PUSH message per DMA
