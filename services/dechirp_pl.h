@@ -26,12 +26,13 @@
  *   0x18 PAT0        TX buffer word 0 (I 15..0, Q 31..16)
  *   0x1C STATUS      bit0 locked, bit1 running, bit2 saturated (sticky), 31..16 outputs/sweep
  *   0x20 PERIOD      RO last measured sweep period, input samples
- *   0x24 IN_COUNT    RO input samples since the RX-DMA sync rising edge
- *   0x28 S0          RO input index of the first sweep start after enable = of output 0
+ *   0x28 S0          RO input index (from the epoch's sync edge) of output sample 0
  *   0x2C SAT_COUNT   RO saturations since soft_reset
  *   0x30 PAT1        TX buffer word 1
  *   0x34 PERIOD_ERR  RO starts not SWEEP_LEN after the previous one (sticky, saturating)
- * Configure with enable = 0, then set enable.
+ * Configure with enable = 0, then set enable: the configuration crosses into l_clk as
+ * static wires, and so does the status on the way back, so a status read can catch a
+ * value mid-change (dcdm_read reads each until two agree).
  */
 #ifndef DECHIRP_PL_H
 #define DECHIRP_PL_H
@@ -58,7 +59,7 @@ typedef struct {
 typedef struct {
     int      locked, running, saturated;
     unsigned outs_per_sweep;
-    uint32_t period, in_count, s0, sat_count, period_err;
+    uint32_t period, s0, sat_count, period_err;
 } dcdm_state_t;
 
 /* Look for the block once (the bitstream cannot change under a running daemon) and keep

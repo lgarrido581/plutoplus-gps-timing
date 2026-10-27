@@ -22,7 +22,6 @@
 #define R_PAT0       (0x18 / 4)
 #define R_STATUS     (0x1C / 4)
 #define R_PERIOD     (0x20 / 4)
-#define R_IN_COUNT   (0x24 / 4)
 #define R_S0         (0x28 / 4)
 #define R_SAT_COUNT  (0x2C / 4)
 #define R_PAT1       (0x30 / 4)
@@ -147,17 +146,28 @@ void dcdm_bypass(void) {
     regs[R_CTRL] = C_BYPASS | C_DETECTOR;
 }
 
+/* A status register read from the AXI side of an unsynchronised l_clk value: read until
+ * two reads agree (they change at most once per sweep). */
+static uint32_t rd2(int r) {
+    uint32_t a = regs[r];
+    for (int i = 0; i < 4; i++) {
+        uint32_t b = regs[r];
+        if (b == a) break;
+        a = b;
+    }
+    return a;
+}
+
 int dcdm_read(dcdm_state_t *st) {
     if (!dcdm_probe(NULL)) return -1;
-    uint32_t s = regs[R_STATUS];
+    uint32_t s = rd2(R_STATUS);
     st->locked = (int)(s & 1u);
     st->running = (int)((s >> 1) & 1u);
     st->saturated = (int)((s >> 2) & 1u);
     st->outs_per_sweep = s >> 16;
-    st->period = regs[R_PERIOD];
-    st->in_count = regs[R_IN_COUNT];
-    st->s0 = regs[R_S0];
-    st->sat_count = regs[R_SAT_COUNT];
-    st->period_err = regs[R_PERIOD_ERR];
+    st->period = rd2(R_PERIOD);
+    st->s0 = rd2(R_S0);
+    st->sat_count = rd2(R_SAT_COUNT);
+    st->period_err = rd2(R_PERIOD_ERR);
     return 0;
 }
