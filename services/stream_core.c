@@ -13,6 +13,10 @@
  * Dechirp: the PL block is configured and enabled once, before the first arm. Every sync
  * edge re-arms it (dechirp_decim 1.1+), so each epoch's output starts at the first sweep
  * start after its edge and S0 counts from that edge (DECIM_PHASE marker).
+ * Free-running (require_pps 0): an arm with no PPS edge in 1.5 s holds ch1 HIGH itself.
+ * The OR's rising edge starts the DMA and fires the latch as a PPS window would, so sample
+ * 0 is still exact; epoch_t0_ns comes from the system clock read beside LIVE_COUNT. After
+ * PPS_BACK_EDGES PPS edges in a row the epoch ends and the next one arms on the PPS.
  */
 #define _GNU_SOURCE
 #include "stream_core.h"
@@ -48,13 +52,16 @@
 #define SEND_STALL_MS 5000         /* a block not sent this long ends the epoch */
 #define SEND_HOLD_MS 30000         /* how long teardown waits for zmq to let go of a block */
 #define ALIGN_MAX 4094             /* dechirp_decim's replica delay line */
+#define PPS_BACK_EDGES 10          /* a free-running epoch yields to a PPS back this long */
 
 enum { ST_IDLE, ST_ARMING, ST_STREAMING, ST_FAILED };
 static const char *STATE_NAME[] = { "idle", "arming", "streaming", "failed" };
 
 /* why an epoch ended */
-enum { END_STOP, END_OVERFLOW, END_LAG, END_SEND, END_REFILL, END_ARM, END_NOEDGE, N_END };
-static const char *END_NAME[] = { "stop", "overflow", "lag", "send", "refill", "arm", "no_edge" };
+enum { END_STOP, END_OVERFLOW, END_LAG, END_SEND, END_REFILL, END_ARM, END_NOEDGE, END_PPS,
+       N_END };
+static const char *END_NAME[] = { "stop", "overflow", "lag", "send", "refill", "arm", "no_edge",
+                                  "pps_back" };
 
 typedef struct {
     pthread_mutex_t mu;
@@ -72,6 +79,7 @@ typedef struct {
     long long       epoch_sec;
     int             decim;            /* 1 raw; D with the PL dechirp */
     uint32_t        s0;               /* dechirp: this epoch's DECIM_PHASE */
+    int             free_run;         /* this epoch started without a PPS edge */
     unsigned long long epochs, blocks, samples, bytes, ends[N_END];
 } stream_t;
 
@@ -104,6 +112,19 @@ typedef struct {
 static double realtime_s(void) {
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static int64_t realtime_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+/* for intervals: chrony may step the realtime clock when the PPS comes back */
+static double monotonic_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
@@ -297,6 +318,10 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
     const int mult = g.mult;
     const int dechirp = r->decim > 0;
     struct iio_device *rx = s->rx;
+    int xl = xo_locked();
+    pthread_mutex_lock(&g.mu);
+    g.xo_locked = xl;
+    pthread_mutex_unlock(&g.mu);
     int gh = capture_gate_hold(s->ctx);
     if (gh != 0) {
         snprintf(err, el, "%s", gh == -2 ? "axi_tdd is running and would not park"
@@ -328,13 +353,25 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
     iio_device_attr_write(rx, "sync_start_enable", "arm");
     iio_context_set_timeout(s->ctx, 3000);
     uint32_t pos = 0;
+    int free_run = 0;
+    uint32_t fr_live = 0;
+    int64_t fr_ns = 0;
     if (!pps_ts_live(&s->pps, 1.5)) {
-        snprintf(err, el, "no live PPS");
-        teardown_epoch(s);
-        return END_ARM;
-    }
-    if (pps_ts_drive_in_gap((uint32_t)s->frame_len, (uint32_t)s->win,
-                            (uint32_t)(mult * r->rate_hz / 1000), realtime_s() + 1.0, &pos) != 0) {
+        if (r->require_pps) {
+            snprintf(err, el, "no live PPS");
+            teardown_epoch(s);
+            return END_ARM;
+        }
+        /* free-running: ch1 HIGH now. The OR rises, the DMA starts and the latch fires on
+         * this edge; the system clock beside LIVE_COUNT, just after, labels it */
+        free_run = 1;
+        capture_gate_open(s->frame_len, r->rate_hz);
+        int64_t ta = realtime_ns();
+        fr_live = s->pps.regs[R_LIVE];
+        fr_ns = ta + (realtime_ns() - ta) / 2;
+    } else if (pps_ts_drive_in_gap((uint32_t)s->frame_len, (uint32_t)s->win,
+                                   (uint32_t)(mult * r->rate_hz / 1000), realtime_s() + 1.0,
+                                   &pos) != 0) {
         snprintf(err, el, "could not release the window before the PPS edge");
         teardown_epoch(s);
         return END_ARM;
@@ -345,6 +382,8 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
     long long start_sec = 0;
     unsigned long long k = 0;
     double t_touch = realtime_s();
+    double pps_t = 0.0;            /* free-running: when the last PPS edge was seen */
+    int pps_run = 0;               /* ... and how many came about a second apart */
     int end = END_STOP;
     for (;;) {
         int last = g.stop;
@@ -364,14 +403,28 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         int ovf = iio_device_reg_read(rx, DMA_STATUS, &dma) == 0 && (dma & DMA_OVF);
         if (ovf) iio_device_reg_write(rx, DMA_STATUS, DMA_OVF);   /* sticky: clear */
         if (k == 0) {
-            pps_ts_latch(&s->pps, &lc, &lseq, &lgps);
-            if (lseq == lseq_prev || lgps == 0) {
-                snprintf(err, el, "no start edge latched (latch seq %u -> %u)", lseq_prev, lseq);
-                end = END_NOEDGE;
-                break;
+            pps_ts_latch(&s->pps, &lc, &lseq, free_run ? NULL : &lgps);
+            if (free_run) {
+                /* the edge came just before the LIVE read: less than half a second ago */
+                int32_t ago = (int32_t)(fr_live - lc);
+                if (lseq == lseq_prev || ago < 0 || (double)ago > (double)mult * g.fs / 2.0) {
+                    snprintf(err, el, "free-running: no start edge latched (latch seq %u -> %u, "
+                             "%d ticks)", lseq_prev, lseq, ago);
+                    end = END_NOEDGE;
+                    break;
+                }
+                lgps = (uint64_t)(fr_ns - llround((double)ago * 1e9 / ((double)mult * g.fs)));
+            } else {
+                if (lseq == lseq_prev || lgps == 0) {
+                    snprintf(err, el, "no start edge latched (latch seq %u -> %u)", lseq_prev,
+                             lseq);
+                    end = END_NOEDGE;
+                    break;
+                }
+                /* hold the gate open steadily before the 0.5 s window closes, and drop the
+                 * window */
+                capture_gate_open(s->frame_len, r->rate_hz);
             }
-            /* hold the gate open steadily before the 0.5 s window closes, and drop the window */
-            capture_gate_open(s->frame_len, r->rate_hz);
             start_sec = (long long)((lgps + 500000000ULL) / 1000000000ULL);
             start_pseq = pseq;
             pseq_prev = pseq;
@@ -418,13 +471,19 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
                 mk[nm].kind = IQW_M_DECIM_PHASE; nm++;
             }
         }
-        if (pseq != pseq_prev) {
+        if (pseq != pseq_prev && !free_run) {
             mk[nm].tick = cnt64 - (uint32_t)(live - ppsc);       /* ticks since sample 0 */
             mk[nm].value = start_sec + (int32_t)(pseq - start_pseq);
             mk[nm].kind = IQW_M_PPS;
             nm++;
-            pseq_prev = pseq;
+        } else if (pseq != pseq_prev) {
+            /* free-running: no markers (their seconds would be the system clock's); count
+             * the edges that come back about a second apart */
+            double now = monotonic_s();
+            pps_run = now - pps_t < 1.5 ? pps_run + 1 : 1;
+            pps_t = now;
         }
+        pseq_prev = pseq;
         /* cyclic TX: where its sample 0 went out (a new tx_start), restated at the first
          * period boundary of every new epoch, so a reader can cut sweeps from any epoch */
         uint32_t tl1;
@@ -464,7 +523,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         h->version = IQW_VERSION;
         h->hdr_bytes = (uint16_t)(sizeof(iqw_hdr) + (size_t)nm * sizeof(iqw_marker));
         h->seq = (*seq)++;
-        h->flags = (last ? IQW_F_LAST : 0);
+        h->flags = (last ? IQW_F_LAST : 0) | (free_run ? IQW_F_FREE_RUN : 0);
         if (k == 0) {
             h->flags |= IQW_F_EPOCH_START | (g.xo_locked ? IQW_F_XO_LOCKED : 0);
             if (prev_end == END_OVERFLOW || prev_end == END_LAG || prev_end == END_SEND ||
@@ -510,6 +569,7 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
             g.epoch = epoch;
             g.epochs++;
             g.epoch_sec = start_sec;
+            g.free_run = free_run;
             g.state = ST_STREAMING;
         }
         g.blocks++;
@@ -525,6 +585,11 @@ static int run_epoch(sess_t *s, const stream_req_t *r, unsigned epoch, uint32_t 
         k++;
         if (realtime_s() - t_touch > 30.0) { lock_touch(); t_touch = realtime_s(); }
         if (last) { end = END_STOP; break; }
+        if (free_run && pps_run >= PPS_BACK_EDGES) {
+            snprintf(err, el, "PPS back for %d s: re-arming on it", PPS_BACK_EDGES);
+            end = END_PPS;
+            break;
+        }
     }
     teardown_epoch(s);
     return end;
@@ -551,7 +616,7 @@ static void *run(void *arg) {
             int end = run_epoch(&s, &r, epoch, &seq, prev_end, &started, err, sizeof err);
             pthread_mutex_lock(&g.mu);
             g.ends[end]++;
-            if (end != END_STOP) snprintf(g.err, sizeof g.err, "%s", err);
+            if (end != END_STOP && end != END_PPS) snprintf(g.err, sizeof g.err, "%s", err);
             pthread_mutex_unlock(&g.mu);
             if (started) { epoch++; ever = 1; tries = 0; }
             if (end == END_STOP) break;
@@ -673,6 +738,7 @@ int stream_start(void *zctx, const stream_req_t *req, char *err, size_t errlen) 
     g.epochs = g.blocks = g.samples = g.bytes = 0;
     g.decim = rq.decim > 0 ? rq.decim : 1;
     g.s0 = 0;
+    g.free_run = 0;
     memset(g.ends, 0, sizeof g.ends);
     g.lag_s = g.max_lag_s = 0.0;
     pthread_mutex_unlock(&g.mu);
@@ -745,15 +811,27 @@ void stream_status(char *json, size_t len) {
         "\"channels\":%d,\"block_samples\":%d,\"blocks_queued\":%d,\"ticks_per_sample\":%d,"
         "\"epoch\":%u,\"epochs\":%llu,\"epoch_t0_s\":%lld,\"blocks\":%llu,\"seconds\":%.3f,"
         "\"MBps\":%.2f,\"lag_ms\":%.1f,\"max_lag_ms\":%.1f,\"xo_locked_at_start\":%s,"
-        "\"ensm_was\":\"%s\","
+        "\"require_pps\":%s,\"timing\":%s,\"ensm_was\":\"%s\","
         "\"ended\":{\"overflow\":%llu,\"lag\":%llu,\"send\":%llu,\"refill\":%llu,\"arm\":%llu,"
-        "\"no_edge\":%llu},\"dechirp\":%s,\"error\":\"%s\"}",
+        "\"no_edge\":%llu,\"pps_back\":%llu},\"dechirp\":%s,\"error\":\"%s\"}",
         STATE_NAME[g.state], c, g.fs / d, g.fc, g.req.channels, g.block_samples,
         g.req.nblocks, g.mult * d, g.epoch, g.epochs, g.epoch_sec, g.blocks, secs,
         up > 0 ? (double)g.bytes / up / 1e6 : 0.0, g.lag_s * 1e3, g.max_lag_s * 1e3,
-        g.xo_locked ? "true" : "false", g.ensm_was[0] ? g.ensm_was : "unknown",
-        g.ends[END_OVERFLOW], g.ends[END_LAG],
-        g.ends[END_SEND], g.ends[END_REFILL], g.ends[END_ARM], g.ends[END_NOEDGE], dc, e);
+        g.xo_locked ? "true" : "false", g.req.require_pps ? "true" : "false",
+        g.epochs == 0 ? "null" : g.free_run ? "\"free_running\"" : "\"pps\"",
+        g.ensm_was[0] ? g.ensm_was : "unknown",
+        g.ends[END_OVERFLOW], g.ends[END_LAG], g.ends[END_SEND], g.ends[END_REFILL],
+        g.ends[END_ARM], g.ends[END_NOEDGE], g.ends[END_PPS], dc, e);
+    pthread_mutex_unlock(&g.mu);
+}
+
+void stream_refused(const char *why) {
+    reap();
+    pthread_mutex_lock(&g.mu);
+    if (!g.thread_live) {
+        g.state = ST_FAILED;
+        snprintf(g.err, sizeof g.err, "%s", why);
+    }
     pthread_mutex_unlock(&g.mu);
 }
 

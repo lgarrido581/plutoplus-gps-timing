@@ -69,6 +69,7 @@ Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
   - `tdd_status` — §7d.
   - `dechirp` — §7e: this bitstream has the PL `dechirp_decim` block, so `stream_start`
     takes a `dechirp` block. Absent on bitstreams without it.
+  - `free_run` — `stream_start` takes `"require_pps": false` (§7b, free-running epochs).
 - `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
   `samples × 4` must fit in it.
 
@@ -313,10 +314,12 @@ measured per second by the PPS markers instead.
 | `channels` | 1 | 1, or 2 (2R2T only) |
 | `block_ms` | 100 | DMA block length, 10–300 ms (rounded down to 1024 samples) |
 | `blocks` | 8 | kernel blocks queued, 2–32: how long the send may stall without loss |
+| `require_pps` | true | false: an epoch whose arm sees no PPS edge starts free-running instead of failing (below) |
 
 **Reply.** Once the first epoch's sample 0 has landed on its PPS edge, the reply is one
 frame, `{"ok":true,"api":...,"stream":{...status...}}`. If the stream can't start, it's
-one `{"error":...}` frame. The causes include: no live PPS, no receiver taking blocks,
+one `{"error":...}` frame. The causes include: no live PPS (with `require_pps`), no
+receiver taking blocks,
 more than ~56 MB/s (`sample_rate_hz × channels × 4` past the Pluto+'s send ceiling), or a
 bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15 s:
 - **First arm:** it is retried once (a missed PPS edge, say). The failed try still
@@ -324,6 +327,10 @@ bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15
 - **Rate just changed:** if no `l_clk` multiple has been confirmed since `pluto_ctld`
   started, the start first waits until 2.1 s after the change (by `tx_load`, for
   example).
+
+A refused `stream_start` also shows in `stream_status` while nothing streams: state
+`failed` with the refusal as `error`. The other fields still describe the last stream that
+ran.
 
 `stream_stop` sends one more block, flagged `LAST`, then stops. It restores the gate as
 a capture leaves it (channel 1 HIGH, PPS window off) and answers with the final status.
@@ -334,9 +341,11 @@ The status object holds:
 - **stream:** `connect`, `sample_rate_hz` and `center_freq_hz` as read back, `channels`,
   `block_samples`, `blocks_queued`, `ticks_per_sample`;
 - **counters:** `epoch`, `epochs`, `epoch_t0_s`, `blocks`, `seconds`, `MBps`, `lag_ms`,
-  `max_lag_ms`, `xo_locked_at_start`;
+  `max_lag_ms`, `xo_locked_at_start` (at the current epoch's start);
+- **timing:** `require_pps` as requested; `timing` is `"pps"` or `"free_running"` for the
+  current (or last) epoch, `null` before the first;
 - **endings:** `ended` counts epochs by reason (`overflow`, `lag`, `send`, `refill`,
-  `arm`, `no_edge`), with the last `error`;
+  `arm`, `no_edge`, `pps_back`), with the last `error` (`pps_back` is not one);
 - **dechirp:** `null`, or the PL block's state for a dechirp stream (§7e).
 
 **Epochs.** Sample 0 of an epoch is latched in hardware on a PPS edge (`epoch_t0_ns`,
@@ -350,6 +359,21 @@ These end an epoch:
 
 A new epoch then starts on the next PPS edge, flagged `EPOCH_START` (plus `OVERFLOW` when
 samples were lost), so a gap is never hidden inside an epoch.
+
+**Free-running epochs** (`"require_pps": false`). The PPS is preferred: each arm waits up
+to 1.5 s for a PPS edge, as with `require_pps`. With none, instead of failing, the daemon
+holds the gate open itself:
+- **Sample 0:** still the hardware-latched gate edge, so the samples, the TX markers and a
+  dechirp stream's sweep phase are exactly as in a PPS epoch.
+- **Label:** `epoch_t0_ns` is the radio's system clock at that edge, read beside the
+  counter. It is as good as chrony's holdover (typically ms), not GPS.
+- **Wire:** every block of the epoch carries `IQW_F_FREE_RUN` (bit 4), and no PPS markers
+  follow; the sample clock is undisciplined, so a reader maps time at the nominal rate.
+- **Return:** once the PPS has been back for 10 edges in a row, about a second apart, the
+  epoch ends (`ended.pps_back`) and the next one arms on the PPS. That costs one gap of
+  one to two seconds. A PPS that flaps can cost a gap each time it holds for 10 s.
+
+The default (`require_pps` true or absent) is unchanged: no PPS edge, no stream.
 
 **Measured on node1** (2026-10-25, 5 MS/s, 100 ms blocks, to the Jetson over GbE):
 - **Load:** `pluto_ctld` at ~17% CPU, the Jetson receiver at ~7% of a core.

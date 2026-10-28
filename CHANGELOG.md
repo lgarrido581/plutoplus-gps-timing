@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### pluto_ctld: free-running streams without PPS
+
+- **`stream_start` `"require_pps": false`** (ICD §7b; `"free_run"` in `caps`). An epoch
+  whose arm sees no PPS edge in 1.5 s starts on its own gate edge instead of failing, so
+  a stream (the radar's, say) keeps running through a GPS outage.
+  - **Timing:** sample 0 is still the hardware-latched edge; `epoch_t0_ns` comes from the
+    system clock. Every block carries the new `IQW_F_FREE_RUN` flag and no PPS markers.
+  - **Return:** after 10 s of PPS again, the epoch ends (`pps_back`) and the next one arms
+    on the PPS.
+  - **Status:** `require_pps`, `timing` (`pps` / `free_running`), `ended.pps_back`;
+    `xo_locked_at_start` (and the `XO_LOCKED` flag) is now read at every epoch's start.
+  - **Default unchanged:** without the field, no PPS still means no stream.
+- **`stream_status` shows a refused `stream_start`** (state `failed`, its reason) instead
+  of the last stream's ending, while nothing streams.
+
 ### pluto_ctld: PL dechirp streams
 
 - **`stream_start` with `dechirp`** (ICD §7e; `"dechirp"` in `caps`). It needs a bitstream

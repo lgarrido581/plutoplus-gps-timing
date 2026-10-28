@@ -23,6 +23,12 @@
  * the epoch's DECIM_PHASE marker. So a tick maps to output samples as
  * (tick / (ticks_per_sample / D) - S0) / D.
  *
+ * Free-running (pluto_ctld stream_start "require_pps": false, no PPS edge at the arm). The
+ * radio starts the epoch itself; every block carries IQW_F_FREE_RUN. Sample 0 is still the
+ * hardware-latched start edge, but epoch_t0_ns is the radio's system clock at that edge
+ * (CLOCK_REALTIME, read beside the counter: as good as chrony's holdover, ~ms), and no PPS
+ * markers follow. The next epoch is PPS-timed again once the PPS has been back for 10 s.
+ *
  * Loss. The radio never delivers a gap inside an epoch: on a DMA overflow (or a lag
  * longer than its queue) it drops the epoch and starts a new one on the next PPS
  * edge. The first block of the new epoch carries IQW_F_EPOCH_START, plus
@@ -41,6 +47,8 @@
 #define IQW_F_OVERFLOW    (1u << 1)  /* the previous epoch ended in lost samples         */
 #define IQW_F_XO_LOCKED   (1u << 2)  /* the radio's clock discipline was LOCKED at start */
 #define IQW_F_LAST        (1u << 3)  /* last block: the stream is stopping               */
+#define IQW_F_FREE_RUN    (1u << 4)  /* no PPS at the epoch's start: epoch_t0_ns is the
+                                      * system clock and no PPS markers follow           */
 
 /* iqw_hdr.format */
 #define IQW_FMT_CI16 1u
