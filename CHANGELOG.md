@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### pluto_ctld: free-running streams without PPS
+
+- **`stream_start` `"require_pps": false`** (ICD §7b; `"free_run"` in `caps`). An epoch
+  whose arm sees no PPS edge in 1.5 s starts on its own gate edge instead of failing, so
+  a stream (the radar's, say) keeps running through a GPS outage.
+  - **Timing:** sample 0 is still the hardware-latched edge; `epoch_t0_ns` comes from the
+    system clock. Every block carries the new `IQW_F_FREE_RUN` flag and no PPS markers.
+  - **Return:** after 10 s of PPS again, the epoch ends (`pps_back`) and the next one arms
+    on the PPS.
+  - **Status:** `require_pps`, `timing` (`pps` / `free_running`), `ended.pps_back`;
+    `xo_locked_at_start` (and the `XO_LOCKED` flag) is now read at every epoch's start.
+  - **Default unchanged:** without the field, no PPS still means no stream.
+- **`stream_status` shows a refused `stream_start`** (state `failed`, its reason) instead
+  of the last stream's ending, while nothing streams.
+
+### pluto_ctld: PL dechirp streams
+
+- **`stream_start` with `dechirp`** (ICD §7e; `"dechirp"` in `caps`). It needs a bitstream
+  with the `dechirp_decim` HDL overlay: no bitstream in a release has it yet.
+  - **What it does:** the PL mixes RX with the running TX buffer and CIC3-decimates by D.
+    The stream carries fs/D sweep-aligned samples, with `sample_rate_hz` and
+    `ticks_per_sample` scaled and a `DECIM_PHASE` marker (iqwire kind 5) in every epoch.
+  - **Safety:** the block is touched only when `/etc/plutoplus/pl_features` lists it and
+    its ID reads "DCDM" (VERSION 1.1+). Bypass is restored at daemon start, before every
+    capture, for raw streams and on every stream exit.
+  - **Refusals:** the order is `tx_load` → `tx_start` → `stream_start`, one channel, and
+    the TX buffer's words 0 and 1 may occur only at sweep starts (checked at `tx_load`).
+  - **Status:** `stream_status` gains a `dechirp` object (S0, locked, period,
+    `period_err`, saturation, `healthy`).
+  - **ALIGN:** `align_samples` is optional. The default comes from the loop measured on
+    node1: 44 samples at 4 MS/s, 45 at 12, 46 at 30.72.
+  - **Verified on node1:** with the radar's image, at 4, 12 and 30.72 MS/s; the radar's
+    tracker runs live on the dechirped stream.
+
 ## v2.2.0 — continuous GPS-timed stream, cyclic TX, gate and rate-change fixes
 
 Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256

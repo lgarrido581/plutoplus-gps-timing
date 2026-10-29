@@ -51,6 +51,14 @@ void tx_status(char *json, size_t len);
 int       tx_loaded(void);   /* a buffer is loaded (started or not) */
 long long tx_rate(void);     /* the rate tx_load set, 0 when nothing is loaded */
 
+/* For a dechirp stream (dechirp_pl.h): 1 while a buffer is loaded, with its first two
+ * 32-bit words as the DMA carries them (I in 15..0, Q in 31..16), the spacing at which
+ * that pair recurs when it recurs only at 0, P, 2P, ... of the cyclic buffer (else 0:
+ * the PL's sweep detector would find false starts), the length, rate and whether it
+ * runs. */
+int  tx_sweep_pattern(uint32_t *w0, uint32_t *w1, uint64_t *period, uint64_t *len,
+                      long long *rate_hz, int *running);
+
 /* For the stream: 1 while TX runs, with the pps_counter LIVE count just after the push
  * (the DMA starts at the push's end), the latency from there to TX sample 0 in samples,
  * the buffer length in samples, its 64-bit hash, and a generation that changes on every

@@ -67,6 +67,9 @@ Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
   - `start_check` — `ctl:start_check_ms` / `ctl:start_edge_latched` are in the meta.
   - `stream`, `tx` — §7b and §7c.
   - `tdd_status` — §7d.
+  - `dechirp` — §7e: this bitstream has the PL `dechirp_decim` block, so `stream_start`
+    takes a `dechirp` block. Absent on bitstreams without it.
+  - `free_run` — `stream_start` takes `"require_pps": false` (§7b, free-running epochs).
 - `max_block_size` (bytes, absent on older builds) — the kernel's DMA block cap now;
   `samples × 4` must fit in it.
 
@@ -311,10 +314,12 @@ measured per second by the PPS markers instead.
 | `channels` | 1 | 1, or 2 (2R2T only) |
 | `block_ms` | 100 | DMA block length, 10–300 ms (rounded down to 1024 samples) |
 | `blocks` | 8 | kernel blocks queued, 2–32: how long the send may stall without loss |
+| `require_pps` | true | false: an epoch whose arm sees no PPS edge starts free-running instead of failing (below) |
 
 **Reply.** Once the first epoch's sample 0 has landed on its PPS edge, the reply is one
 frame, `{"ok":true,"api":...,"stream":{...status...}}`. If the stream can't start, it's
-one `{"error":...}` frame. The causes include: no live PPS, no receiver taking blocks,
+one `{"error":...}` frame. The causes include: no live PPS (with `require_pps`), no
+receiver taking blocks,
 more than ~56 MB/s (`sample_rate_hz × channels × 4` past the Pluto+'s send ceiling), or a
 bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15 s:
 - **First arm:** it is retried once (a missed PPS edge, say). The failed try still
@@ -322,6 +327,10 @@ bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15
 - **Rate just changed:** if no `l_clk` multiple has been confirmed since `pluto_ctld`
   started, the start first waits until 2.1 s after the change (by `tx_load`, for
   example).
+
+A refused `stream_start` also shows in `stream_status` while nothing streams: state
+`failed` with the refusal as `error`. The other fields still describe the last stream that
+ran.
 
 `stream_stop` sends one more block, flagged `LAST`, then stops. It restores the gate as
 a capture leaves it (channel 1 HIGH, PPS window off) and answers with the final status.
@@ -332,9 +341,12 @@ The status object holds:
 - **stream:** `connect`, `sample_rate_hz` and `center_freq_hz` as read back, `channels`,
   `block_samples`, `blocks_queued`, `ticks_per_sample`;
 - **counters:** `epoch`, `epochs`, `epoch_t0_s`, `blocks`, `seconds`, `MBps`, `lag_ms`,
-  `max_lag_ms`, `xo_locked_at_start`;
+  `max_lag_ms`, `xo_locked_at_start` (at the current epoch's start);
+- **timing:** `require_pps` as requested; `timing` is `"pps"` or `"free_running"` for the
+  current (or last) epoch, `null` before the first;
 - **endings:** `ended` counts epochs by reason (`overflow`, `lag`, `send`, `refill`,
-  `arm`, `no_edge`), with the last `error`.
+  `arm`, `no_edge`, `pps_back`), with the last `error` (`pps_back` is not one);
+- **dechirp:** `null`, or the PL block's state for a dechirp stream (§7e).
 
 **Epochs.** Sample 0 of an epoch is latched in hardware on a PPS edge (`epoch_t0_ns`,
 about +100 ns), as in a gated capture. The DMA then free-runs, and every later PPS edge
@@ -347,6 +359,21 @@ These end an epoch:
 
 A new epoch then starts on the next PPS edge, flagged `EPOCH_START` (plus `OVERFLOW` when
 samples were lost), so a gap is never hidden inside an epoch.
+
+**Free-running epochs** (`"require_pps": false`). The PPS is preferred: each arm waits up
+to 1.5 s for a PPS edge, as with `require_pps`. With none, instead of failing, the daemon
+holds the gate open itself:
+- **Sample 0:** still the hardware-latched gate edge, so the samples, the TX markers and a
+  dechirp stream's sweep phase are exactly as in a PPS epoch.
+- **Label:** `epoch_t0_ns` is the radio's system clock at that edge, read beside the
+  counter. It is as good as chrony's holdover (typically ms), not GPS.
+- **Wire:** every block of the epoch carries `IQW_F_FREE_RUN` (bit 4), and no PPS markers
+  follow; the sample clock is undisciplined, so a reader maps time at the nominal rate.
+- **Return:** once the PPS has been back for 10 edges in a row, about a second apart, the
+  epoch ends (`ended.pps_back`) and the next one arms on the PPS. That costs one gap of
+  one to two seconds. A PPS that flaps can cost a gap each time it holds for 10 s.
+
+The default (`require_pps` true or absent) is unchanged: no PPS edge, no stream.
 
 **Measured on node1** (2026-10-25, 5 MS/s, 100 ms blocks, to the Jetson over GbE):
 - **Load:** `pluto_ctld` at ~17% CPU, the Jetson receiver at ~7% of a core.
@@ -452,6 +479,117 @@ Request `tdd_status` (or `{"op":"tdd_status"}`). Reply, one frame:
   now. −1 means none since `pluto_ctld` started.
 - **Other clients:** a client that toggles `enable` itself makes `latched` stale. The
   example above is the idle state `pluto_ctld` leaves, with RX and TX gates both HIGH.
+
+## 7e. PL dechirp — `stream_start` with `dechirp`
+
+Advertised by `"dechirp"` in `ping`'s `caps`, only on a bitstream built with the
+`dechirp_decim` HDL overlay. The block sits between the AD9361 core's RX output and the RX
+DMA:
+- **Dechirp:** it multiplies each RX sample by the conjugate of the TX word the DAC sent
+  `align_samples + 1` strobes earlier.
+- **Decimation:** a CIC3 decimates by D = 2^k, with its state zeroed at every sweep start.
+- **Sweep starts:** a start is where the replica's words (n−1, n) equal the loaded TX
+  buffer's words 0 and 1.
+
+So the DMA, and the stream, carry fs/D sweep-aligned ci16 beat samples. The register map
+and arithmetic are in `services/dechirp_pl.h`; the design is radar-stack
+`docs/PL_DECHIRP_DECIM.md`.
+
+**Bypass.** At power-up the block is a wire. `pluto_ctld` holds it there at start, before
+every `capture`, for every raw stream and at the end of every stream (any exit path), so
+captures and raw streams see the stock path.
+
+**Presence.** The block is touched only when `/etc/plutoplus/pl_features` (packed into the
+same FIT as the bitstream) lists `dechirp_decim 0x7C470000 v1`, and its ID register then
+reads `0x4443444D` ("DCDM") with VERSION 1.1 or later (the sync-edge re-arm). A read of
+an unmapped AXI address aborts, so nothing probes it blindly.
+
+```json
+{"op":"stream_start","connect":"tcp://192.168.50.20:5563","freq_hz":5.8e9,
+ "sample_rate_hz":30720000,"channels":1,"block_ms":100,"blocks":8,
+ "dechirp":{"decim":16,"sweep_samples":12288,"align_samples":100,"filter":"cic3"}}
+```
+| field | meaning |
+|---|---|
+| `decim` | D, a power of two from 1 up to 2^(VERSION's max log2 D) (32) |
+| `sweep_samples` | input samples per sweep: a multiple of D, below 2^24 |
+| `align_samples` | the replica delay beyond one DAC strobe, 0–4094 (optional; below) |
+| `filter` | `"cic3"`, the only one (optional) |
+
+**`align_samples`** is the loop from the block's DAC tap to its RX input, in input
+samples. It runs through the AD9361's digital chains: mostly a sample count, plus a small
+part fixed in time (one sample more per ~9 MS/s). It isn't TX's `latency_samples`. Calibrate it with the direct path: in a beat sweep
+the direct path is a tone at slope × residual delay, and the right ALIGN puts it in bin 0.
+Measured on node1 (Pluto+, 2r2t), 2026-10-27:
+
+| rate | ALIGN |
+|---|---|
+| 4 MS/s | 44 |
+| 12 MS/s | 45 |
+| 30.72 MS/s | 46 |
+
+If the request omits it, `pluto_ctld` uses this table, linear between the points and held
+outside them; `stream_status` reports the value used.
+
+**Order:** `tx_load` → `tx_start` → `stream_start`, the reverse of the raw cycle (§7c). The
+block emits nothing until the replica shows a sweep start. `stream_start` refuses:
+- no `dechirp` cap;
+- TX not loaded and running at the stream's rate;
+- `channels` other than 1;
+- an out-of-range field;
+- a TX buffer whose words 0 and 1 also occur anywhere other than k·`sweep_samples`
+  (checked cyclically at `tx_load`). A zero guard at the sweep start, or per-sweep
+  coding, would give false starts or none. The buffer must be identical sweeps.
+
+**Configuration.** With the block disabled, `pluto_ctld`:
+1. soft-resets it;
+2. writes DECIM, SWEEP_LEN, ALIGN, PAT0 and PAT1 (TX words 0 and 1 exactly as loaded:
+   I in bits 15..0, Q in 31..16) and reads each back;
+3. clears bypass and sets enable, once, before the first arm.
+
+Every rising edge of the RX-DMA sync re-arms the block:
+- the output is gated and the pipeline cleared;
+- the next sweep start re-latches S0.
+
+So each epoch's DMA sample 0 is a sweep start of that epoch.
+
+**The stream.** The header and markers change as follows:
+- `sample_rate_hz` = fs/D, and `ticks_per_sample` = (ticks per input sample) × D.
+- `epoch_t0_ns` and every marker `tick` still count from input sample 0, the PPS edge.
+- Each epoch's first block carries a `DECIM_PHASE` marker (kind 5) with
+  `tick` = S0 × input ticks per sample and `value` = S0.
+- Output sample m covers input samples S0 + m·D … S0 + m·D + D − 1. A tick maps to output
+  samples as `(tick / (ticks_per_sample / D) − S0) / D`.
+- The ~56 MB/s send ceiling applies to the output rate.
+- `TX_START`/`TX_HASH` are still sent when TX's start can be placed (§7c); the sweep phase
+  comes from `DECIM_PHASE`.
+
+`stream_status`'s `dechirp` object:
+```json
+{"decim":16,"sweep_samples":12288,"align_samples":100,"s0":4711,"healthy":true,
+ "locked":true,"running":true,"period":12288,"outputs_per_sweep":768,"period_err":0,
+ "saturated":false,"sat_count":0,"tx_running":true,"pat0":"0x00007213","pat1":"0x0A1F7101"}
+```
+- `s0` — this epoch's DECIM_PHASE.
+- `locked` — the detector's last measured `period` equals `sweep_samples`.
+- `outputs_per_sweep` — as the block counted it.
+- `healthy` — all of: `running`, `locked`, `period` = `sweep_samples`,
+  `outputs_per_sweep` = `sweep_samples`/D, and TX running.
+- `period_err` — sweep starts that came off schedule since the configuration. A dropped or
+  repeated DAC sample counts here; the block re-phases on the next match.
+- `saturated`, `sat_count` — product or output saturations.
+
+`tx_stop` during a dechirp stream is allowed, but the output then has no replica
+(`healthy` false).
+
+**Measured on node1** (2026-10-27, the radar's dechirp image, the radar's direct path at
+5.8 GHz):
+- **4 MS/s, D = 8 and 16:** `healthy`, locked, `period_err` 0. The direct path is in
+  bin 0 with ALIGN 44.
+- **12 MS/s, D = 4:** the dechirped direct path matches the raw path's; ALIGN 45 puts it
+  at 0 Hz.
+- **30.72 MS/s, D = 16:** ALIGN 46 puts the direct path at 0 Hz, and the radar's
+  tracker runs live on the stream (ws-fmcw-5800, 5.8 m cells).
 
 ## 8. Security
 

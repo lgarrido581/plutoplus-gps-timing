@@ -15,6 +15,20 @@
  * tick 0 is allowed), so any sample's GPS time follows from the two anchors around
  * it and a drifting sample clock costs nothing.
  *
+ * Dechirp (pluto_ctld stream_start "dechirp", the PL dechirp_decim block). The samples are
+ * the RX mixed with the running TX buffer and CIC3-decimated by D: sample_rate_hz is the
+ * output rate fs/D and ticks_per_sample is (ticks per input sample) x D. epoch_t0_ns and
+ * every marker tick still count from input sample 0, the PPS edge; output sample m
+ * covers input samples S0 + m*D .. S0 + m*D + D - 1, where S0 (a sweep start) comes in
+ * the epoch's DECIM_PHASE marker. So a tick maps to output samples as
+ * (tick / (ticks_per_sample / D) - S0) / D.
+ *
+ * Free-running (pluto_ctld stream_start "require_pps": false, no PPS edge at the arm). The
+ * radio starts the epoch itself; every block carries IQW_F_FREE_RUN. Sample 0 is still the
+ * hardware-latched start edge, but epoch_t0_ns is the radio's system clock at that edge
+ * (CLOCK_REALTIME, read beside the counter: as good as chrony's holdover, ~ms), and no PPS
+ * markers follow. The next epoch is PPS-timed again once the PPS has been back for 10 s.
+ *
  * Loss. The radio never delivers a gap inside an epoch: on a DMA overflow (or a lag
  * longer than its queue) it drops the epoch and starts a new one on the next PPS
  * edge. The first block of the new epoch carries IQW_F_EPOCH_START, plus
@@ -33,6 +47,8 @@
 #define IQW_F_OVERFLOW    (1u << 1)  /* the previous epoch ended in lost samples         */
 #define IQW_F_XO_LOCKED   (1u << 2)  /* the radio's clock discipline was LOCKED at start */
 #define IQW_F_LAST        (1u << 3)  /* last block: the stream is stopping               */
+#define IQW_F_FREE_RUN    (1u << 4)  /* no PPS at the epoch's start: epoch_t0_ns is the
+                                      * system clock and no PPS markers follow           */
 
 /* iqw_hdr.format */
 #define IQW_FMT_CI16 1u
@@ -42,6 +58,8 @@
 #define IQW_M_TX_START 2u   /* a cyclic TX buffer started; value = its length, samples */
 #define IQW_M_GAIN     3u   /* RX gain from this tick on; value = milli-dB (AGC: -1)  */
 #define IQW_M_TX_HASH  4u   /* the TX buffer that started here; value = 64-bit hash   */
+#define IQW_M_DECIM_PHASE 5u /* dechirp: output sample 0 is input sample S0 (a sweep
+                              * start) of the epoch; value = S0, tick = S0 x input tps   */
 
 typedef struct {
     uint32_t magic;            /* IQW_MAGIC                                          */

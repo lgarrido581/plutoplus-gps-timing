@@ -37,6 +37,7 @@
 #include <string>
 
 #include "capture_core.h"
+#include "dechirp_pl.h"
 #include "stream_core.h"
 #include "tx_core.h"
 
@@ -139,14 +140,17 @@ static void send_error(void *sock, const std::string &msg) {
 //   tx           tx_load (+ ci16 frame) / tx_start / tx_stop / tx_status: cyclic TX1, its
 //                start marked in a running stream (iqwire TX_START / TX_HASH)
 //   tdd_status   the axi_tdd gate's registers and what this daemon last latched
+//   dechirp      stream_start takes a "dechirp" block: this bitstream has the PL
+//                dechirp_decim block (listed in /etc/plutoplus/pl_features, ID "DCDM")
+//   free_run     stream_start takes "require_pps": false (free-running epochs without PPS)
 // max_block_size: the kernel's DMA block cap (bytes); samples x 4 must fit in it.
 static void send_ping(void *sock) {
-    char b[320];
+    char b[352];
     snprintf(b, sizeof b,
              "{\"pong\":true,\"api\":\"%s\",\"schema\":\"dsn.health/1\",\"t_unix\":%.3f,"
              "\"caps\":[\"held_arm\",\"zero_copy\",\"start_check\",\"stream\",\"tx\","
-             "\"tdd_status\"],\"max_block_size\":%lld}",
-             API, now_unix(), capture_block_cap());
+             "\"tdd_status\",\"free_run\"%s],\"max_block_size\":%lld}",
+             API, now_unix(), dcdm_probe(nullptr) ? ",\"dechirp\"" : "", capture_block_cap());
     send_one(sock, b);
 }
 
@@ -251,6 +255,7 @@ static void handle_capture(void *sock, const std::string &body) {
     }
 
     capture_result_t res;
+    dcdm_bypass();                   /* the raw path (a no-op without the PL block) */
     cap_lock_acquire();              /* pause xo_correct's rate-disturbing write */
     int rc = capture_run(&req, &res);
     cap_lock_release();
@@ -305,8 +310,14 @@ static void send_stream(void *sock, bool ok, const char *status) {
     send_one(sock, r);
 }
 
+// A refused stream_start: the reply, and stream_status says so too (when nothing streams).
+static void stream_refuse(void *sock, const std::string &msg) {
+    stream_refused(msg.c_str());
+    send_error(sock, msg);
+}
+
 static void handle_stream(void *sock, void *zctx, const std::string &op, const std::string &body) {
-    char st[1024];
+    char st[2048];
     if (op == "stream_status") {
         stream_status(st, sizeof st);
         send_stream(sock, true, st);
@@ -321,36 +332,57 @@ static void handle_stream(void *sock, void *zctx, const std::string &op, const s
     memset(&req, 0, sizeof req);
     std::string ep = jstr(body, "connect");
     if (!endpoint_ok(ep)) {
-        send_error(sock, "stream_start needs \"connect\": \"tcp://HOST:PORT\"");
+        stream_refuse(sock, "stream_start needs \"connect\": \"tcp://HOST:PORT\"");
         return;
     }
     snprintf(req.connect, sizeof req.connect, "%s", ep.c_str());
     double v;
-    if (!jnum(body, "freq_hz", &v))        { send_error(sock, "missing freq_hz"); return; }
+    if (!jnum(body, "freq_hz", &v))        { stream_refuse(sock, "missing freq_hz"); return; }
     req.freq_hz = (long long)v;
-    if (!jnum(body, "sample_rate_hz", &v)) { send_error(sock, "missing sample_rate_hz"); return; }
+    if (!jnum(body, "sample_rate_hz", &v)) { stream_refuse(sock, "missing sample_rate_hz"); return; }
     req.rate_hz = (long long)v;
     if (jnum(body, "gain_db", &v)) { req.gain_db = v; req.have_gain = 1; }
     req.channels = jnum(body, "channels", &v) ? (int)v : 1;
     req.block_ms = jnum(body, "block_ms", &v) ? v : 100.0;
     req.nblocks  = jnum(body, "blocks", &v) ? (int)v : 8;
+    req.require_pps = jbool(body, "require_pps", true) ? 1 : 0;
+    // "dechirp": {"decim": D, "sweep_samples": N, "align_samples": A, "filter": "cic3"}
+    // (align_samples optional: the measured default for the rate)
+    // (keys unique in the request, so the flat readers find them inside the object)
+    size_t dp = jpos(body, "dechirp");
+    if (dp != std::string::npos && body.compare(dp, 4, "null") != 0) {
+        if (body[dp] != '{' || !jnum(body, "decim", &v) || v < 1) {
+            stream_refuse(sock, "dechirp needs {\"decim\", \"sweep_samples\"[, \"align_samples\"]}");
+            return;
+        }
+        req.decim = (int)v;
+        if (!jnum(body, "sweep_samples", &v)) { stream_refuse(sock, "dechirp: missing sweep_samples"); return; }
+        req.sweep_samples = (long long)v;
+        req.align_samples = jnum(body, "align_samples", &v) ? (int)v : -1;
+        if (req.align_samples < -1) { stream_refuse(sock, "dechirp: align_samples must be 0..4094"); return; }
+        std::string filt = jstr(body, "filter");
+        if (!filt.empty() && filt != "cic3") {
+            stream_refuse(sock, "dechirp: filter \"" + filt + "\" unknown (cic3 only)");
+            return;
+        }
+    }
     long long txr = tx_rate();
     if (txr > 0 && (txr > req.rate_hz + 2 || txr < req.rate_hz - 2)) {   // RX and TX share the rate
         char m[160];
         snprintf(m, sizeof m, "TX is loaded at %lld S/s: stream at the same rate (or tx_stop first)", txr);
-        send_error(sock, m);
+        stream_refuse(sock, m);
         return;
     }
     if (g_unsent_fd[0] >= 0) {          // a capture reply's buffer still held by zmq
         if (!finish_send(&g_unsent, g_unsent_fd, 5000)) {
-            send_error(sock, "previous capture's IQ is still being sent");
+            stream_refuse(sock, "previous capture's IQ is still being sent");
             return;
         }
         g_unsent_fd[0] = g_unsent_fd[1] = -1;
     }
     char err[256] = "";
     if (stream_start(zctx, &req, err, sizeof err) != 0) {
-        send_error(sock, std::string("stream_start: ") + err);
+        stream_refuse(sock, std::string("stream_start: ") + err);
         return;
     }
     stream_status(st, sizeof st);
@@ -449,6 +481,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     fprintf(stderr, "pluto_ctld: REP %s (capture-control)\n", ep.c_str());
+    dcdm_info_t dci;
+    if (dcdm_probe(&dci)) {
+        dcdm_bypass();               // the raw path until a dechirp stream asks otherwise
+        fprintf(stderr, "pluto_ctld: PL dechirp_decim at 0x%08X, VERSION 0x%08X (D up to %d)\n",
+                dci.base, dci.version, 1 << dci.max_log2d);
+    } else {
+        fprintf(stderr, "pluto_ctld: no PL dechirp_decim (%s)\n", dci.why);
+    }
 
     while (!g_stop) {
         zmq_msg_t m;
@@ -504,7 +544,7 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "pluto_ctld: shutting down\n");
     if (stream_running()) {
-        char st[1024];
+        char st[2048];
         stream_stop(st, sizeof st);
     }
     if (tx_loaded()) {
