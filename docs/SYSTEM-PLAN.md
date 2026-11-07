@@ -33,7 +33,7 @@ passive-loc/                     # umbrella repo (the "product")
 │   ├── vita49-streamer/         # → vita49-pluto-sdr
 │   └── tdoa-lib/                # → buddy's lib
 ├── infra/
-│   ├── tailscale/               # ACLs, tags, node naming (plutonode1, ...)
+│   ├── tailscale/               # ACLs, tags, node naming
 │   └── aws/                     # coordinator: IaC + collector service
 ├── node/                        # per-node edge runtime (runs on each Jetson)
 │   └── ...                      # bringup + capture→reduce→push agent
@@ -62,7 +62,7 @@ Prove the physics on the bench first; wrap infra around what works.
 ## First experiment in detail — FM cooperative calibration
 
 - **Why FM:** strong, free, always-on, wideband enough for sharp cross-correlation; no TX license.
-- **Setup:** node #1 has both SDRs on one wire (Pluto+ `ip:169.254.6.36`, FMCOMMS5 `ip:169.254.92.202`)
+- **Setup:** node #1 has both SDRs on one wire (Pluto+ `ip:<pluto-ip>`, FMCOMMS5 `ip:<fmcomms5-ip>`)
   fed from antenna(s). Tune ~96–104 MHz to a strong local station.
 - **Measure:** capture GPS-second-aligned windows; cross-correlate Pluto+ vs FMCOMMS5 (and, later,
   node-vs-node). The correlation peak's sub-sample offset = residual inter-receiver time error; its
@@ -74,7 +74,7 @@ Prove the physics on the bench first; wrap infra around what works.
 
 - Compute split: **hybrid** — node GPU edge-reduce → cloud TDOA fusion.
 - Cloud: **transport-agnostic** behind one `push()` — self-hosted VPS *or* managed object storage.
-- Pluto+/SDRs stay **off** Tailscale; only the **Jetson** joins the tailnet (node `plutonode1`).
+- Pluto+/SDRs stay **off** Tailscale; only the **Jetson** joins the tailnet.
 - Per-site GPS is the time source; **Tailscale is transport, not timing.**
 
 ## Open problems

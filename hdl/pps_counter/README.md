@@ -5,7 +5,8 @@ with an optional hardware **PPS latch**. Lets Linux measure the AD936x reference
 against GPS time, which is what `xo_correction` needs to discipline the clock —
 and, with PPS wired into the PL, gives sample-accurate timestamps for TDOA.
 
-See [`pps_counter.v`](pps_counter.v) for the RTL + full register map.
+See [`pps_counter.v`](pps_counter.v) for the RTL + full register map (header comment:
+counter, PPS latch, TDD frame and DMA-start latch registers, 0x00–0x40).
 
 ## Two modes
 
@@ -18,39 +19,45 @@ Frequency discipline averages out the µs IRQ jitter, so the **software-latch mo
 needs no extra FPGA pin** and is the recommended starting point.
 
 > **Separate feature — the DMA-start latch (`LATCH_COUNT`/`LATCH_SEQ`, 0x3C/0x40).**
-> Distinct from the `pps_in` latch above: `latch_trig` is fanned out from `axi_tdd
-> tdd_channel_1` (the RX-DMA sync) and captures the free-run counter at sample[0] of a
-> TDD-gated capture → sample-exact GPS timestamp (`tdd_pps_latch`, ±~16 ns). **Added in
-> commit `d329bbc` (ADDR_WIDTH 6→7).** The released **`v1.5` bitstream predates it**, so on
-> that image 0x40 aliases the 0x00 ID (`0x50505343`) and the latch never fires — captures
-> fall back to the software `tdd_pps_window` anchor. Build via `--hwlatch` to include it
-> (the BD tcl also re-drives `axi_tdd/sync_in` from `pps_tick`). Verify: `devmem 0x7C460040
-> 32` should count up, not read `0x50505343`.
+> Distinct from the `pps_in` latch above: `latch_trig` is driven by the RX-DMA sync
+> itself — the output of the `dma_sync_or` gate (`dma_sync_or/Res` =
+> `axi_tdd/tdd_channel_1 | pps_counter/tdd_enable`) — and captures the free-run counter
+> at sample[0] of a TDD-gated capture → sample-exact GPS timestamp (`tdd_pps_latch`,
+> ±~16 ns), whichever source opened the gate. Every bitstream this repo's build generates
+> has it, with or without `--hwlatch`. Verify: `devmem 0x7C460040 32` should count up, not
+> read `0x50505343`.
+> *Historical:* added in commit `d329bbc` (ADDR_WIDTH 6→7). The released `v1.5`
+> bitstream predates it: on that image 0x40 aliases the 0x00 ID (`0x50505343`), the latch
+> never fires, and captures fall back to the `tdd_pps_window` anchor.
 
 ## Integration into the Pluto HDL (ADI block design)
 
 **Automated** by `docker-build-inner.sh` (the `--vivado` build): it copies this
-RTL into `hdl/projects/pluto/`, appends the wiring to `system_bd.tcl`, and forces
-an XSA re-synth when the integration changes. The appended TCL:
+RTL into `hdl/projects/pluto/`, regenerates the pps_counter block at the end of
+`system_bd.tcl` and `system_constr.xdc` on every run, and forces an XSA re-synth when
+the integration changes. **The generated Tcl in `docker-build-inner.sh` (the
+"Integrate pps_counter into the Pluto block design" step) is the source of truth**;
+in outline it:
 
-```tcl
-add_files -norecurse $ad_hdl_dir/projects/pluto/pps_counter.v
-update_compile_order -fileset sources_1
-create_bd_cell -type module -reference pps_counter pps_counter_0
-ad_connect axi_ad9361/l_clk pps_counter_0/cnt_clk   ;# AD936x sample clock
-ad_connect sys_cpu_resetn   pps_counter_0/cnt_resetn
-ad_connect GND              pps_counter_0/pps_in     ;# SW-latch (no PL pin yet)
-ad_cpu_interconnect 0x7C460000 pps_counter_0         ;# AXI4-Lite base address
-```
+- adds the RTL and creates `pps_counter_0`, with `cnt_clk` = `axi_ad9361/l_clk`,
+  `cnt_resetn` = `sys_cpu_resetn`, and the AXI4-Lite slave at `0x7C460000`
+  (`ad_cpu_interconnect`);
+- drives `pps_in` from a new top-level port `pps_ext` on `--hwlatch` builds (the XDC
+  pins it to F20, LVCMOS18, pull-down; `system_top.v` is patched to match), or ties it
+  to GND otherwise;
+- disconnects `axi_tdd_0/sync_in` and drives it from `pps_counter_0/pps_tick` (kept
+  but no longer relied on: without `sync_reset`, `axi_tdd` syncs only once, at enable);
+- inserts a 2-input OR, `dma_sync_or`, in front of the RX-DMA sync:
+  `axi_ad9361_adc_dma/sync = axi_tdd_0/tdd_channel_1 | pps_counter_0/tdd_enable`, and
+  connects `dma_sync_or/Res` to `pps_counter_0/latch_trig`;
+- adds the CDC `set_false_path` constraints.
 
-Real net names confirmed from the Pluto BD: AXI clock `sys_cpu_clk`
-(`FCLK_CLK0`, 100 MHz), reset `sys_cpu_resetn`, sample clock `axi_ad9361/l_clk`.
-`ad_cpu_interconnect` auto-wires `s_axi` + its clock/reset. The RTL is added
-*inside* `system_bd.tcl` (not `system_project.tcl`) because the BD is built
-during `adi_project_create`, before the top-level file list is added.
-
-For the HW-latch upgrade later: replace the `GND` connect with the PPS PL pin
-(a `create_bd_port` + `ad_connect` + an XDC `set_property PACKAGE_PIN` line).
+Only `pps_in` depends on `--hwlatch`; the OR, the `sync_in` rewire and the latch are
+generated either way. Real net names confirmed from the Pluto BD: AXI clock
+`sys_cpu_clk` (`FCLK_CLK0`, 100 MHz), reset `sys_cpu_resetn`, sample clock
+`axi_ad9361/l_clk`. The RTL is added *inside* `system_bd.tcl` (not
+`system_project.tcl`) because the BD is built during `adi_project_create`, before the
+top-level file list is added.
 
 ## Device tree / software access
 
@@ -69,7 +76,7 @@ assert rd(0x00) == 0x50505343          # "PPSC" — IP present
 # /sys/bus/iio/devices/iio:device*/xo_correction (or via libiio).
 ```
 
-(Optionally add a `generic-uio` DT node for `0x43C00000 0x1000` for a cleaner
+(Optionally add a `generic-uio` DT node for `0x7C460000 0x1000` for a cleaner
 interface than `/dev/mem`.)
 
 ## Status

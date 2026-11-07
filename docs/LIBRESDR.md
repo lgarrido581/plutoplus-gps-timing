@@ -169,7 +169,7 @@ same firmware to QSPI and stop rewriting SD cards for normal updates:
 
 ```powershell
 python -m pip install paramiko
-python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+python flash_libresdr_qspi.py --host <board-ip> --run-lvds-test --yes
 ```
 
 The helper flashes `output/libre.frm` to the firmware/FIT MTD partition only.

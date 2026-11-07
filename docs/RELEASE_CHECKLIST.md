@@ -1,10 +1,13 @@
 # Firmware release checklist
 
-This repo ships firmware for two boards, released together so a consumer can pick the variant
-that matches its hardware:
+This repo has firmware for two boards; a release carries the variant for each board that was
+built and smoke-tested for it, so a consumer can pick the one that matches its hardware:
 
 - **`pluto.frm`** — Pluto+ / Zynq-7010
 - **`libre.frm`** — LibreSDR / Zynq-7020
+
+Which boards a release carries is stated in [`CHANGELOG.md`](../CHANGELOG.md). v2.1.0 and v2.2.0
+are Pluto+-only; LibreSDR stays on v2.0.4 until it is smoke-tested on that board.
 
 Two release types:
 
@@ -13,8 +16,8 @@ Two release types:
   "Latest". Use it for validation builds.
 - **stable** — a full semver Release (`vX.Y.Z`, `--latest`). This is the official history.
 
-Every release MUST carry **both** `.frm` variants plus a `SHA256SUMS` asset, so a consumer can
-verify integrity and select by board.
+Every release MUST carry a `SHA256SUMS` asset plus the `.frm` of each board it covers, so a
+consumer can verify integrity and select by board. Say in the CHANGELOG which boards that is.
 
 ---
 
@@ -28,13 +31,15 @@ verify integrity and select by board.
 
 ---
 
-## Build both variants
+## Build each variant the release carries
 
 - [ ] **Pluto+ (`pluto.frm`):**
-      `bash docker-run.sh [--prebuilt-bit output/working.bit] [--hwlatch]` → `output/pluto.frm`.
-      For a services-only change, extract the known-good FPGA bit from the prior `.frm` and pass
-      `--prebuilt-bit` instead of re-synthesizing.
-- [ ] **LibreSDR (`libre.frm`):**
+      `bash docker-run.sh` → `output/pluto.frm`. This reuses the pinned `output/working.bit`
+      (= `--prebuilt-bit output/working.bit --hwlatch`) and fails unless `fpga@1` matches the
+      sha256 in `boards/plutoplus/fpga.sha256pin`. Do **not** extract a bit from a prior `.frm`
+      instead — a truncated extract is how v2.0.1 bricked (see `docs/BUILD.md`). For a gateware
+      change, build with `--vivado <path> --hwlatch` and update `output/working.bit` + the pin.
+- [ ] **LibreSDR (`libre.frm`)** — only if the release carries LibreSDR:
       `bash docker-run.sh --target libresdr [--prebuilt-bit output/libresdr-hdl/system_top.bit]`
       → `output/libre.frm`.
       NOTE: the LibreSDR target needs the `LICENSE.html` generation on-branch — `SKIP_LEGAL=1`
@@ -52,11 +57,13 @@ verify integrity and select by board.
 
 ---
 
-## Validate on hardware (one of each board)
+## Validate on hardware (one of each board the release carries)
 
 - [ ] Back up the current QSPI (`mtd`) partition first, for rollback.
-- [ ] Flash a Pluto+ with `flash_frm.py <pluto.frm> [--host <ip>]` (md5-verify → flashcp →
-      reboot). Flash a LibreSDR with `flash_libresdr_qspi.py <libre.frm>` (mtd3 path).
+- [ ] Flash a Pluto+ with `flash_frm.py <pluto.frm> [--host <ip>]` (on-board md5 check →
+      the board's `update_frm.sh`, which writes mtd3 and sets `fit_size` → `fit_size` check →
+      reboot). Flash a LibreSDR with `flash_libresdr_qspi.py <libre.frm>` (bare `flashcp` to mtd3;
+      see the `fit_size` caution in `FLASHING.md`).
 - [ ] After reboot, confirm on each board: GPS acquires a fix, 1PPS is present and disciplined
       (advancing), the RX path is alive, and the sample rate matches the board (Pluto+ vs
       LibreSDR clock the AD9361 data path differently).
@@ -69,11 +76,13 @@ verify integrity and select by board.
 
 ## Publish
 
-- [ ] Compute `SHA256SUMS` covering `pluto.frm` and `libre.frm`.
+- [ ] For a Pluto+-only release, **delete (or rebuild) any stale `output/libre.frm`** before
+      running `release_firmware.sh`: it attaches `output/libre.frm` whenever the file exists.
+- [ ] Compute `SHA256SUMS` covering the `.frm` files the release carries.
 - [ ] **beta:** create-once the `beta` pre-release, then
-      `gh release upload beta --clobber pluto.frm libre.frm SHA256SUMS` and retarget the tag.
-- [ ] **stable:** `gh release create vX.Y.Z --latest` with `pluto.frm`, `libre.frm`, `SHA256SUMS`.
-- [ ] Verify the release lists **both** variants + `SHA256SUMS`, and (for stable) that
+      `gh release upload beta --clobber <the .frm files> SHA256SUMS` and retarget the tag.
+- [ ] **stable:** `gh release create vX.Y.Z --latest` with the `.frm` files and `SHA256SUMS`.
+- [ ] Verify the release lists the variants it carries + `SHA256SUMS`, and (for stable) that
       `GET /releases/latest` resolves to it and NOT the `beta` pre-release.
 - [ ] Release notes: version, which sub-images changed (fpga/ramdisk/kernel), per-board md5.
 

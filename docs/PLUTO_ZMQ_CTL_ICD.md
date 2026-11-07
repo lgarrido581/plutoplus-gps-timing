@@ -15,18 +15,28 @@ Companion to the read-only telemetry interface (`dsn.pluto_zmq/1`, ports 5560/55
 by design. The authoritative client-facing spec is DSN's `docs/FIRMWARE_CTL_5562_SPEC.md`;
 this ICD documents the firmware server built from it.
 
+> **Which doc covers what:** this ICD is authoritative for the `:5562` control socket
+> (`pluto_ctld`). `docs/PLUTO_ZMQ_ICD.md` is authoritative for the read-only telemetry
+> sockets `:5560`/`:5561` (`pluto_zmqd`), and `docs/PLUTO_ZMQ_API.md` is the overview of
+> those two.
+
 ---
 
 ## 1. Scope
 
-One socket, two ops: a liveness **`ping`** and a **`capture`** — "tune to this
-frequency/rate, capture N complex samples with sample 0 gated to an agreed future 1PPS
-edge, and return them as a SigMF (metadata + raw int16 IQ) pair, stamped with the
-*measured* GPS time of sample 0." This lets a fleet take time-aligned snapshots for
-TDOA. It replaces the old SSH-pushed `iq_capture` path.
+One REP socket. Its ops:
+- **`ping`** — liveness and capabilities (§3).
+- **`capture`** — "tune to this frequency/rate, capture N complex samples with sample 0
+  gated to an agreed future 1PPS edge, and return them as a SigMF (metadata + raw int16
+  IQ) pair, stamped with the *measured* GPS time of sample 0" (§4–§7). This lets a fleet
+  take time-aligned snapshots for TDOA. It replaces the old SSH-pushed `iq_capture` path.
+- **`stream_start` / `stream_stop` / `stream_status`** — a continuous GPS-timed RX stream
+  to a receiver (§7b).
+- **`tx_load` / `tx_start` / `tx_stop` / `tx_status`** — cyclic TX (§7c).
+- **`tdd_status`** — the `axi_tdd` gate state (§7d).
 
-Out of scope: streaming, file writing, per-packet timestamps, control of the telemetry
-daemon (5560/5561). DSN's GPS/PPS/LO trust gate reads telemetry independently.
+Out of scope: file writing, control of the telemetry daemon (5560/5561). DSN's
+GPS/PPS/LO trust gate reads telemetry independently.
 
 ## 2. Transport & framing
 
@@ -35,25 +45,35 @@ daemon (5560/5561). DSN's GPS/PPS/LO trust gate reads telemetry independently.
   socket, so every path (incl. malformed input) replies exactly once.
 - **Bind:** `0.0.0.0` (all interfaces) by default; env `ZMQ_BIND` restricts it to one
   IP, `ZMQ_CTL_PORT` overrides the port. (Daemon args: `--bind`, `--port`.)
-- **Request frame** is either (1) a bare ASCII op word — currently only `ping` — or
-  (2) a UTF-8 JSON object with an `"op"` field. Parsing: a body whose first non-space
-  char is `{` is treated as JSON and dispatched on its `op`; otherwise the trimmed
-  frame text *is* the op (so the literal `ping` works). `{"op":"ping"}` also works.
-- **Reply framing encodes the outcome by frame count** — the client decides success
-  vs. failure purely by counting frames:
+- **Request frame** is either (1) a bare ASCII op word or (2) a UTF-8 JSON object with
+  an `"op"` field. Parsing: a body whose first non-space char is `{` is treated as JSON
+  and dispatched on its `op`; otherwise the trimmed frame text *is* the op. Any op can be
+  sent as a bare word (`ping`, `tdd_status`, `stream_status`, …), but one sent that way
+  carries no fields, so the ops that need them (`capture`, `stream_start`, `tx_load`)
+  are refused as missing a required field. `{"op":"ping"}` also works. `tx_load` alone
+  takes a second request frame (§7c); further frames are read and dropped.
+- **Reply framing.** Frame count alone tells success from failure only for `capture`.
+  Every other op answers with exactly one frame, on success and failure alike:
 
   | Outcome | Frames | Content |
   |---|---|---|
-  | `ping` | **1** | one JSON object |
   | `capture` success | **2** | `[ meta-json (UTF-8), iq-bytes ]` |
-  | `capture` error / refusal | **1** | one JSON object with an `"error"` key |
+  | `ping` | **1** | `{"pong":true,…}` (§3) |
+  | `stream_*`, `tx_*`, `tdd_status` success | **1** | `{"ok":true,…}` plus a `"stream"`, `"tx"` or `"tdd"` status object |
+  | `stream_stop` with no stream running, `tx_stop` with nothing loaded | **1** | `{"ok":false,…}` plus the (idle) status object — no `"error"` key |
+  | any error / refusal, any op (incl. an unknown op) | **1** | one JSON object with an `"error"` key |
+
+  **Client rule:** two frames ⇒ capture succeeded. One frame ⇒ parse it: an `"error"`
+  key means the request was refused or failed; otherwise `"ok":false` means a stop found
+  nothing to stop; otherwise (`"ok":true`, or `"pong":true`) it succeeded.
 
 ## 3. `ping`
 
 Request: `ping` (or `{"op":"ping"}`). Reply (1 frame):
 ```json
 { "pong": true, "api": "dsn.pluto_zmq.ctl/1", "schema": "dsn.health/1", "t_unix": 1782523200.123,
-  "caps": ["held_arm", "zero_copy", "start_check"], "max_block_size": 134217728 }
+  "caps": ["held_arm", "zero_copy", "start_check", "stream", "tx", "tdd_status"],
+  "max_block_size": 134217728 }
 ```
 - `pong` = boolean `true`. `api` starts with `"dsn.pluto_zmq"` (exactly
   `"dsn.pluto_zmq.ctl/1"`). This is how DSN auto-discovery confirms the control port.
@@ -86,7 +106,7 @@ A single JSON object. Optional fields are omitted when unset — do not assume p
 | `offset_samples` | integer | opt | samples to skip past the edge before sample 0 (default 0) |
 | `gain_db` | number | opt | manual RX gain, dB; omitted ⇒ `slow_attack` AGC |
 | `node_id` | string | opt | echoed to meta as `gpsanchor:node_id` |
-| `lat`,`lon`,`alt` | numbers | opt | antenna geotag (deg, deg, m HAE) → `gpsanchor:antenna_position` |
+| `lat`,`lon`,`alt` | numbers | opt | antenna geotag (deg, deg, m HAE) → `gpsanchor:antenna_position`. All three or none: if any is missing the geotag is dropped without an error |
 
 \* When `tdd_sync` is true, `t0_gps` is supplied and the server releases the PPS window
 into the DMA in the second before it (§7, arming) — so every node given the same `t0_gps`
@@ -128,18 +148,24 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   capture, else a frame-grid snap (`"tdd_pps_window"`), else the free-running anchor
   (`"live_count_at_refill"`). Epoch is the PPS-disciplined `CLOCK_REALTIME` — consistent
   on every node, which is all DSN's cross-node differencing needs.
-  - ⚠️ **The `tdd_pps_latch` path needs a bitstream that actually contains the DMA-start
-    latch registers** (`LATCH_COUNT`/`LATCH_SEQ` at 0x3C/0x40, added in HDL commit
-    `d329bbc`, built via `--hwlatch`). The **prebuilt `v1.5` bitstream predates that commit**
-    (its `pps_counter` has a 6-bit address decode: reading 0x40 aliases back to the 0x00 ID
-    `0x50505343`, and 0x3C reads 0). On that image the latch can **never** fire, so every
-    capture uses `tdd_pps_window` — a frame-grid *assertion* that the window opened on a PPS
-    edge, not a measurement. To get true ±~16 ns `gps_ns0`, rebuild the bitstream from
-    `d329bbc`+ (`docker-run.sh --vivado <vivado-2023.2> --hwlatch`, which also re-drives
-    `axi_tdd/sync_in` from `pps_tick` so the frame re-anchors every PPS instead of free-
-    running). The firmware already reads the latch correctly — it just needs the register to
-    exist. Confirm on hardware with `devmem 0x7C460040 32`: a real latch counts up from a
-    small value; `0x50505343` means the latch isn't in the image.
+  - **Where the latch comes from.** `LATCH_COUNT`/`LATCH_SEQ` (0x3C/0x40) are in every
+    bitstream `docker-build-inner.sh` generates. The block-design Tcl it appends always
+    ORs `axi_tdd/tdd_channel_1` with `pps_counter/tdd_enable` (`dma_sync_or`) into the
+    RX-DMA sync, feeds that OR output to `latch_trig`, and connects `pps_tick` to
+    `axi_tdd/sync_in`. `--hwlatch` only chooses what drives `pps_in`: the F20 PPS pin
+    (`pps_ext`), or GND without it. A build with no PPS on `pps_in` never sees a PPS, so
+    gated captures are refused. A plain `./docker-run.sh` reuses `output/working.bit`
+    (which has the latch) and builds with `PPS_HWLATCH=1`.
+    The `pps_tick → sync_in` wire doesn't GPS-lock `axi_tdd`. Without `sync_reset` the
+    core syncs once, at enable, then free-runs; `pps_counter`'s window provides the PPS
+    anchor (§7).
+    Check a radio with `devmem 0x7C460040 32`: a real latch counts up from a small value;
+    `0x50505343` (the ID) means the image has no latch, and every capture falls back to
+    `tdd_pps_window` — a frame-grid *assertion* that the window opened on a PPS edge, not a
+    measurement.
+    *Historical:* the latch was added in HDL commit `d329bbc` (address decode 6 → 7 bits).
+    The prebuilt `v1.5` bitstream predates it: there 0x40 aliases the 0x00 ID and 0x3C
+    reads 0, so the latch never fires.
 - **Integer-second anchoring (`tdd_sync` + `t0_gps`).** The hardware sub-second
   (`pps_counter` phase within the second) is unambiguous, but the *integer* second comes
   from the OS clock, which chrony can lock a whole second off (gpsd pinning an NMEA epoch
@@ -161,9 +187,28 @@ Bold = consumed by DSN (`dsn/offload_capture.py::burst_from_sigmf`):
   the requested `freq_hz` (the chip silently clamps an out-of-range LO); DSN trusts this.
 - `global["timing:health"]` = `{ pps_present (bool), degraded (bool), xo_ppm (number),
   latch_rms_ns (number) }`. `degraded` is true if PPS is absent, a coarse-second
-  skew was detected (above), **or** the start self-check failed (`ctl:start_check_ms`). Also emitted: `gpsanchor:cnt_clk_hz`, `:pps_seq`,
-  `:pps_count`, `:sample_index0`, `:method`, `:second_source`, `:coarse_skew_s`,
-  `core:datetime`, `core:sample_start`.
+  skew was detected (above), **or** the start self-check failed (`ctl:start_check_ms`).
+  `pps_present` is the `pps_counter` STATUS bit — at least one PPS edge since the FPGA
+  came up, not proof the PPS is live now. `latch_rms_ns` is a constant `16.0` written by
+  the server, not a measurement. Also emitted:
+  `gpsanchor:cnt_clk_hz`, `:pps_seq`, `:pps_count`, `:sample_index0`, `:method`,
+  `:second_source`, `:coarse_skew_s`, `core:datetime`, `core:sample_start`.
+- Latch diagnostics (added in v2.0.4 so a stale-latch event can be diagnosed from the
+  consumer side; all 0 when the capture was not gated):
+  - `captures[0]["gpsanchor:latch_count"]`, `["gpsanchor:latch_seq"]` — the raw
+    `LATCH_COUNT` / `LATCH_SEQ` registers read after the capture.
+  - `["gpsanchor:latch_seq_prev"]` — `LATCH_SEQ` before the capture. The latch fired for
+    this capture only if `latch_seq` differs from it.
+  - `["gpsanchor:latch_gps_ns"]` — the GPS time the server derived from the latch; 0 when
+    it judged the latch stale or implausible.
+  - `["gpsanchor:pps_count_at_read"]` — `PPS_COUNT` when the latch was read.
+  - `["gpsanchor:latch_off_signed"]` — `(int32)(latch_count − pps_count_at_read)`, in
+    `cnt_clk` counts. Negative means the latched edge came before the newest PPS.
+- `captures[0]["ctl:ensm_was"]` (string) — the AD9361 `ensm_mode` the server found before
+  the capture (`"unknown"` if unreadable). The server sets `fdd` when it was anything
+  else, since the receiver only produces data in FDD. A value other than `"fdd"` means
+  the chip was found in another state — for example `alert`, which another libiio client
+  can leave behind.
 - `captures[0]["ctl:alloc_ms"]` (number) — time to allocate the DMA buffer (≈ 300 ms for
   118 MB), and `captures[0]["ctl:max_block_size"]` (integer bytes) — the kernel's DMA
   block cap at capture time, which bounds `samples × 4` (§7, capture length).
@@ -300,7 +345,7 @@ under the DMA. The clock is therefore not disciplined while streaming; its rate 
 measured per second by the PPS markers instead.
 
 ```json
-{"op":"stream_start","connect":"tcp://192.168.50.20:5563","freq_hz":94700000,
+{"op":"stream_start","connect":"tcp://192.0.2.20:5563","freq_hz":94700000,
  "sample_rate_hz":5000000,"gain_db":40,"channels":1,"block_ms":100,"blocks":8}
 ```
 | field | default | meaning |
@@ -325,6 +370,7 @@ bad request. The reply takes up to the retune time plus ~1–2 s, and at most 15
 
 `stream_stop` sends one more block, flagged `LAST`, then stops. It restores the gate as
 a capture leaves it (channel 1 HIGH, PPS window off) and answers with the final status.
+With no stream running it answers `{"ok":false,…,"stream":{…}}` (no `"error"` key).
 `stream_status` answers at any time.
 
 The status object holds:
@@ -333,6 +379,8 @@ The status object holds:
   `block_samples`, `blocks_queued`, `ticks_per_sample`;
 - **counters:** `epoch`, `epochs`, `epoch_t0_s`, `blocks`, `seconds`, `MBps`, `lag_ms`,
   `max_lag_ms`, `xo_locked_at_start`;
+- **radio:** `ensm_was`, the AD9361 `ensm_mode` found when the stream started (`fdd`
+  expected; the stream sets `fdd` if not, as a capture does — see `ctl:ensm_was`);
 - **endings:** `ended` counts epochs by reason (`overflow`, `lag`, `send`, `refill`,
   `arm`, `no_edge`), with the last `error`.
 
@@ -343,7 +391,11 @@ These end an epoch:
 - a DMA overflow;
 - a lag past the queue;
 - a refill error;
-- a send the receiver doesn't take (no receiver, or a stall over 30 s).
+- a send the receiver doesn't take (no receiver, or a block not taken within 5 s).
+
+(When an epoch ends, or the stream stops, the server waits up to 30 s for zmq to let go
+of a block still in flight before it frees the buffer; past that it leaks the buffer
+rather than free memory zmq may still read.)
 
 A new epoch then starts on the next PPS edge, flagged `EPOCH_START` (plus `OVERFLOW` when
 samples were lost), so a gap is never hidden inside an epoch.
@@ -377,7 +429,8 @@ full scale ±32767 (the DAC takes the top 12 bits).
   2. Puts the AD9361 in FDD.
   3. Holds axi_tdd channel 2, the TX DMA's gate, HIGH (off, polarity 1).
   4. Fills a cyclic buffer, then sets the requested attenuation.
-- **Does not start it.** The reply carries the buffer's 64-bit FNV-1a `hash`.
+- **Does not start it.** The reply carries the buffer's 64-bit FNV-1a `hash`, as a hex
+  string (`"0x…"`, 16 digits).
 
 `tx_start` pushes the buffer, which plays until `tx_stop`. pluto_ctld reads the
 pps_counter just before and after the push. With a stream running, the next block carries:
@@ -403,9 +456,12 @@ A TX started before the stream is placed only if it started less than 2^31 count
 earlier (~3.5 min at 5 MS/s).
 
 `tx_stop` sets the attenuation to −89 dB, then frees the buffer. Channel 2 stays HIGH, which
-transmits nothing with no buffer loaded. `tx_status` reports `loaded`, `running`,
-`samples`, `sample_rate_hz`, `freq_hz`, `gain_db`, `hash`, `starts`, `start_live`,
-`start_window_counts`, `underflows` and `ensm_was`.
+transmits nothing with no buffer loaded. With nothing loaded, `tx_stop` answers
+`{"ok":false,…,"tx":{…}}` (no `"error"` key). `tx_status` reports `loaded`, `running`,
+`samples`, `sample_rate_hz`, `freq_hz`, `gain_db`, `hash` (hex string), `starts` (pushes
+since `pluto_ctld` started), `start_live_after` (the `pps_counter` `LIVE_COUNT` read just
+after the last push), `start_window_counts`, `latency_samples`, `underflows` and
+`ensm_was` (the AD9361 `ensm_mode` found by `tx_load`, which sets `fdd`).
 
 `underflows` counts the `tx_status` reads that found the DAC's sticky underflow bit set
 since the previous read; it is cleared 2 ms after the push. A cyclic DMA that runs dry

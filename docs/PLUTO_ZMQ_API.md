@@ -3,7 +3,9 @@
 > **Formal interface spec:** [`docs/PLUTO_ZMQ_ICD.md`](PLUTO_ZMQ_ICD.md) is the
 > authoritative wire ICD (per-field data dictionary, message catalog, framing, error
 > matrix, versioning — conformance-tested against the binary). This page is the
-> design/integration overview.
+> design/integration overview; where the two differ, the ICD wins. Capture, streaming
+> and TX are a separate daemon on `:5562`, specified in
+> [`docs/PLUTO_ZMQ_CTL_ICD.md`](PLUTO_ZMQ_CTL_ICD.md).
 
 A read-only **ZMQ** API (`pluto_zmqd`) that exposes everything a sensing consumer
 (DistributedSensingNetwork, "DSN") currently needs **root SSH + `devmem`/`gpspipe`**
@@ -16,7 +18,8 @@ for. With this running, the two read-only SSH paths can be retired:
 | `ssh root@pluto cat …/out_altvoltage0_RX_LO_…`   | `rf` block                      |
 | *(no equivalent — could only detect by capturing)* | `dma` block (best-effort)     |
 
-IQ capture itself is **out of scope** and stays as-is. This API is **read-only by
+IQ capture is **out of scope** here: it is `pluto_ctld` on `:5562`
+([`PLUTO_ZMQ_CTL_ICD.md`](PLUTO_ZMQ_CTL_ICD.md)). This API is **read-only by
 construction** — no capture, no retune, no register writes (see [Security](#security)).
 
 It is the **server side** of the same contract DSN reads over HTTP from
@@ -66,23 +69,34 @@ sending again.
 {
   "schema":  "dsn.health/1",       // identical envelope to /health (timing+gps fields)
   "api":     "dsn.pluto_zmq/1",    // marks the rf/dma extension + ZMQ transport
+  "fw_version": "2.2.0",           // firmware release baked in at build ("unknown" if unset);
+                                   //   full snapshot only, not the per-block REP replies
   "node_id": "pluto",              // hostname
   "board": "plutoplus",            // "plutoplus" or "libresdr"
   "t_unix":  1750000000,           // server wall clock at emit (seconds)
   "uptime_s": 12345,
 
   "timing": {                      // pps_counter (devmem) + xocorrect.log
-    "pps_present":   true,         // STATUS bit0 — hw PPS latch alive (--hwlatch build,
-                                   //   after the GPS PPS reaches F20). false on base build.
-    "pps_advancing": true,         // PPS_SEQ advanced over the last 1 Hz tick. null until
-                                   //   two ticks have elapsed, or if no counter.
+    "pps_present":   true,         // STATUS bit0 = (PPS_SEQ != 0): at least one PPS edge
+                                   //   since the FPGA came up. STICKY, not liveness -- it
+                                   //   stays true after the PPS stops; use pps_advancing.
+                                   //   false with no counter or no PPS on F20 (--hwlatch).
+    "pps_advancing": true,         // LIVENESS: true while PPS_SEQ has moved within the last
+                                   //   2.5 s, false once it has been frozen longer. Updated on
+                                   //   the 1 Hz tick; null until the second tick, or if no
+                                   //   counter. The 2.5 s also runs from the daemon's first
+                                   //   sample, so a dead PPS reads true for up to ~2.5 s
+                                   //   after start.
     "pps_seq":       42,           // pps_counter SEQ (increments once per GPS PPS edge)
     "xo_ppm":        0.0,          // last value the xocorrect daemon logged. It auto-derives
                                    //   nominal from live rate x interface multiplier, so it
                                    //   works on Pluto+ and LibreSDR. null if absent.
     "cnt_clk_hz":    61440000      // DELTA reg = AD9361 l_clk ticks per PPS second (data clock,
                                    //   commonly 2x on Pluto+, 4x on LibreSDR). GPS-disciplined;
-                                   //   basis for xo_ppm.
+                                   //   basis for xo_ppm. null only with no counter; 0 on a
+                                   //   counter build until the first PPS edge, and the first
+                                   //   edge's value counts from FPGA reset -- trust it from
+                                   //   the second edge on.
   },
 
   "gps": {                         // gpsd (persistent client). Only fields with a value appear.
@@ -136,8 +150,11 @@ when found. A wedge that doesn't log will still read `rx_ok=true` — so use it 
 ## Security
 
 - **Read-only by construction.** No op writes any register, retunes, or captures.
-  Capture/retune are deliberately **v2**, planned on a *separate, authenticated*
-  socket — never folded into this one. No socket-level auth.
+  Capture/retune live on a *separate* socket — `pluto_ctld` on `:5562`
+  ([`PLUTO_ZMQ_CTL_ICD.md`](PLUTO_ZMQ_CTL_ICD.md)) — never folded into this one. That
+  control socket is a WRITE interface and, like this one, has **no authentication**;
+  its bind is set by `ZMQ_BIND` in `services/S66ctld` (all interfaces by default). No
+  socket-level auth here either.
 - **Binds all interfaces by default (`0.0.0.0`).** The Pluto's LAN subnet isn't
   knowable ahead of time, so the init script binds everything and serves the same
   read-only telemetry on each interface. This is acceptable because the Pluto's

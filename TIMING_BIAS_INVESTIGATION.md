@@ -20,6 +20,22 @@
 > - Recommendations (host side): calibrate against an elevated near-LOS reference (or none),
 >   validate on a second station, and prefer a median over several dwells to a single-shot.
 
+> **Later note (2026-11-07).** "Labels truthful" above covers the captures examined in this
+> investigation. Two `gps_ns0` label faults were found afterwards and fixed (see `CHANGELOG.md`):
+> - **v2.0.4 (2026-07-19), anchor-label slip:** an intermittent late label of +0.4967 s at a
+>   10 MHz `cnt_clk` (+0.7484 s at 20 MHz), from computing the latch sub-second with an
+>   *unsigned* 32-bit `LATCH_COUNT − PPS_COUNT`, which wraps whenever the latch predates the
+>   newest PPS. The delta is now signed, with a staleness gate (`services/pps_timestamp.c`).
+> - **v2.1.0 (2026-10-25), early start mislabeled:** a gated capture could start before its PPS
+>   edge and carry that edge's label — the DMA was queued into a window that was still open.
+>   It hit gated captures whose window was still open ~0.35 s before `t0_gps`: captures over
+>   ~0.43 s. The window is now held low until the buffer is queued, and a start self-check
+>   (`ctl:start_check_ms`) flags any early start `degraded`.
+>
+> Also: the `latch_rms=16 ns` quoted below is the fixed value the server writes into
+> `timing:health.latch_rms_ns`, not a per-capture measurement. The original record below is
+> otherwise unchanged.
+
 Goal: find and remove, **in firmware**, a constant timing bias between two Pluto+ radios'
 GPS-anchored captures. The bias is a fixed offset (not drift). It is currently corrected by a
 host-side constant; we want the two radios' capture timing to agree at the hardware level so no
@@ -36,7 +52,8 @@ host correction is needed.
   `pps_counter/tdd_enable`; the DMA-start latch observes the OR output.
 - Validated: cross-radio window-open delta (the `gps_ns0` difference for matched cycles)
   dropped from milliseconds-and-accumulating to **0–200 ns bounded**; every capture reports
-  `method=tdd_pps_latch`, `latch_rms=16 ns`. Keep this behavior — this task fixes a residual
+  `method=tdd_pps_latch`, `latch_rms=16 ns` (a constant in the metadata, not a measurement —
+  see the 2026-11-07 note above). Keep this behavior — this task fixes a residual
   **constant** offset on top of it, not by reverting it.
 
 ## Symptom
@@ -95,6 +112,12 @@ axi_tdd base `0x7C440000`. Key source: `services/capture_core.c` (capture path +
    latched sample[0]); convert to seconds with `PPS_DELTA`. Compare the two radios. This is the
    ground-truth window-open phase; the difference between the two radios is the physical part of
    the bias.
+   > **Note (2026-11-07):** don't reuse this unsigned `mod 2^32` arithmetic. It is the v2.0.4
+   > bug: when the latch predates the newest PPS (a stale latch, or a PPS landing between the
+   > edge and the read) it wraps to ~2^32 and reads ~frac(2^32/`cnt_hz`) s late. Use the signed
+   > delta `(int32)(LATCH_COUNT − PPS_COUNT)` as `pps_ts_latch()` in `services/pps_timestamp.c`
+   > does, and treat a value outside about −⅛ … +1⅛ s as stale. Gated captures also report it as
+   > `gpsanchor:latch_off_signed`.
 
 3. **Compare that measured phase to what `gps_ns0` reports.** In `capture_core.c`/`pps_timestamp.c`,
    `gps_ns0`'s sub-second is derived from the latch (`lgps`) or from `RX_START/fs`. Confirm which

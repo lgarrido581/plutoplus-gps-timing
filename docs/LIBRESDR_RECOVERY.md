@@ -42,14 +42,14 @@ supports Pluto-like Zynq/AD936x clones and advertises SD-card boot support:
 Use this when the board still boots Linux and accepts SSH.
 
 ```powershell
-python flash_libresdr_qspi.py --host 192.168.1.50 --yes
+python flash_libresdr_qspi.py --host <board-ip> --yes
 ```
 
 If the candidate image is already bad, flash a previously saved known-good
 `libre.frm` instead:
 
 ```powershell
-python flash_libresdr_qspi.py path\to\known-good-libre.frm --host 192.168.1.50 --yes
+python flash_libresdr_qspi.py path\to\known-good-libre.frm --host <board-ip> --yes
 ```
 
 The script verifies the file on the board before writing and refuses
@@ -155,7 +155,7 @@ Use this when QSPI boot fails but the board can boot from SD.
 5. Flash a known-good `libre.frm` back to QSPI:
 
 ```powershell
-python flash_libresdr_qspi.py path\to\known-good-libre.frm --host 192.168.1.50 --yes
+python flash_libresdr_qspi.py path\to\known-good-libre.frm --host <board-ip> --yes
 ```
 
 6. Power off, restore QSPI boot mode, remove SD if required, and boot from QSPI.
@@ -222,13 +222,15 @@ Confirm the XC7Z020 appears in the hardware chain
 
 Record the cable name, VID/PID, and detected device here once tested.
 
-Do not add automated bootloader writes until this path is proven on the actual
-board. Once JTAG detection is validated, the next useful additions are:
+An explicit bootloader/env write tool now exists:
+`flash_libresdr_qspi_boot.py` backs up `mtd0`/`mtd1`/`mtd2` over SSH, and writes
+`mtd0`/`mtd1` only with `--flash --i-understand-this-writes-bootloader` (see
+[`LIBRESDR_QSPI.md`](LIBRESDR_QSPI.md)). It needs a running Linux, so it is not
+a recovery path for a board that no longer boots. Still to add once JTAG is
+validated on the actual board:
 
-- a read-only QSPI backup procedure;
-- a known-good full-QSPI restore procedure;
-- an explicit `--write-bootloader` tool that is impossible to invoke by
-  accident.
+- a known-good full-QSPI restore procedure (including `mtd3`) that does not
+  depend on Linux booting.
 
 ## Recommended pre-flight before QSPI experiments
 

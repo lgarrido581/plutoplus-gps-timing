@@ -39,13 +39,15 @@ overlay, Vivado 2022.2 build, and SD-card artifacts.
 | **LAN NTP server** | serves GPS time to RFC1918 + IPv6 link‑local once locked — see [NTP](docs/NTP.md) |
 | **Diagnostics** | `ppstest`, `gpsmon`, `cgps`, `gpspipe` |
 | **Read-only telemetry over ZMQ** | `pluto_zmqd` serves timing/GPS/RF/DMA so a client can read node state **without root SSH** — autostarts at boot. See [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) |
-| **GPS-anchored capture over ZMQ** | `pluto_ctld` tunes + captures PPS-gated IQ → a SigMF pair stamped with the measured GPS time of sample 0 (for multi-node TDOA) — autostarts at boot. See [capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) |
+| **GPS-anchored capture, stream and TX over ZMQ** | `pluto_ctld` (:5562) tunes + captures PPS-gated IQ → a SigMF pair stamped with the measured GPS time of sample 0 (for multi-node TDOA), streams RX continuously, and loads/starts a cyclic TX waveform — autostarts at boot on all interfaces, **no authentication**: any host that can reach :5562 can make the radio transmit (see [`services/README.md`](services/README.md)). See [capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) |
 | **GPS‑disciplined sample clock** *(`--hwlatch`)* | FPGA `pps_counter` + `xo_correct.sh` lock the AD936x sample clock to GPS for `xo_correction`/TDOA — see [FPGA counter](hdl/pps_counter/README.md) |
 | **GPS‑aligned TDD / coincident capture** *(`--hwlatch`)* | `pps_counter`'s frame counter reloads on every PPS edge and gates the RX‑DMA window → captures open on a common GPS edge across nodes. (ADI's `axi_tdd` re‑anchors per pulse only with `sync_reset`, and then mid‑frame — so the capture gates on `pps_counter`, not `axi_tdd`.) Verify with `tdd_verify.sh`; design in [PPS‑aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) |
 
-**Two build variants:** the **base** firmware (`bash docker-run.sh`, no Vivado) gives everything above
-except the FPGA counter; the **`--hwlatch`** firmware adds the sample‑clock counter + auto‑discipline
-and rebuilds the bitstream (needs Vivado 2023.2). See [Build details](docs/BUILD.md).
+**Build:** a bare `bash docker-run.sh` needs no Vivado: it reuses the pinned bitstream
+`output/working.bit` (FPGA counter + F20 latch) and builds its matching `--hwlatch` services, so it
+gives everything above. It **refuses to build** if `output/working.bit` is missing — that file is
+not in git (see [Build details](docs/BUILD.md)). `--vivado <path> --hwlatch` re‑synthesizes the
+bitstream (needs Vivado 2023.2) and is only for gateware changes.
 
 ## How this compares
 
@@ -99,10 +101,10 @@ GPS module → Pluto+ expansion header (map these **MIO numbers** to your board'
 ### Pluto+
 
 ```bash
-bash docker-run.sh                                    # base firmware (no Vivado)
-bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # + FPGA sample-clock counter & discipline
+bash docker-run.sh                                    # reuses output/working.bit (no Vivado)
+bash docker-run.sh --vivado /path/to/Xilinx --hwlatch # re-synthesizes the bitstream (gateware changes)
 ```
-Output lands in `./output/`: **`pluto.frm`** (flash this), `pluto.dfu`, and a release zip. (The host
+Output lands in `./output/`: **`pluto.frm`** (flash this), `pluto.dfu` and `uboot-env.dfu`. (The host
 `tee` pipeline may print a non‑zero exit even on success — trust the `Done.` line + `output/pluto.frm`.)
 More in [Build details](docs/BUILD.md).
 
@@ -150,7 +152,7 @@ LibreSDR updates can be promoted to QSPI over SSH:
 
 ```powershell
 python -m pip install paramiko
-python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+python flash_libresdr_qspi.py --host <board-ip> --run-lvds-test --yes
 ```
 
 The QSPI helper writes only `output/libre.frm` to the firmware/FIT partition; it

@@ -59,14 +59,14 @@ python -m pip install paramiko
 Then flash the validated image:
 
 ```powershell
-python flash_libresdr_qspi.py --host 192.168.1.50 --run-lvds-test --yes
+python flash_libresdr_qspi.py --host <board-ip> --run-lvds-test --yes
 ```
 
 If the board has already passed `verify_lvds.sh` during this boot and you do
 not want to rerun the PRBS eye check:
 
 ```powershell
-python flash_libresdr_qspi.py --host 192.168.1.50 --yes
+python flash_libresdr_qspi.py --host <board-ip> --yes
 ```
 
 This is the normal update path after the board is already booting a validated
@@ -119,6 +119,14 @@ The script:
 7. reboots and performs a quick IIO/PPS smoke check.
 
 Use `--no-reboot` if you want to flash now and reboot later.
+
+> ⚠️ **Unverified: `fit_size`.** Unlike the Pluto+ `update_frm.sh` path, this script does not
+> set the U-Boot `fit_size` variable. On Pluto+, U-Boot reads exactly `fit_size` bytes of the FIT,
+> so a larger image with a stale `fit_size` doesn't boot (see [`../FLASHING.md`](../FLASHING.md)).
+> Whether the LibreSDR U-Boot does the same has not been checked; nothing in this repo shows it.
+> Until it is, flash with `--no-reboot`, run `fw_printenv | grep -E 'fit_size|sf read'`, and only
+> reboot if the QSPI boot reads a fixed size or `fit_size` is at least the new FIT size (`.frm`
+> bytes − 33).
 
 ## Alternative: flash the firmware partition over U-Boot DFU
 
@@ -173,14 +181,14 @@ large for the current boot partition layout.
 First make a backup without flashing:
 
 ```powershell
-python flash_libresdr_qspi_boot.py --host 192.168.1.50
+python flash_libresdr_qspi_boot.py --host <board-ip>
 ```
 
 Then, if the backup succeeds and you are booted from the known-good SD image:
 
 ```powershell
 python flash_libresdr_qspi_boot.py `
-  --host 192.168.1.50 `
+  --host <board-ip> `
   --flash `
   --i-understand-this-writes-bootloader
 ```

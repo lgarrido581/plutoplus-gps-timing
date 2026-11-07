@@ -98,6 +98,15 @@ PLL**, so the sample clock glitches ~tens of ppm for ~1 sample on each correctio
 - the 2 samples after a write are excluded from the control average (relock
   settling).
 
+> **Note (2026-10-25, v2.1.0):** the "control average" in this page — the value
+> each correction steers on — was the **mean** of the in-range `PPS_DELTA`
+> samples when these measurements were taken. Since v2.1.0 `xo_correct.sh` steers
+> on their **median** (`avg_delta`): the sample clock occasionally gains tens to
+> hundreds of counts in one second, inside `MAXPPM`, and the 8-sample mean then
+> stepped `xo_correction` by up to ~24 ppm the wrong way. Up to three glitched
+> seconds in eight no longer move it. The measurements here are unchanged and were
+> taken with the mean; see `CHANGELOG.md` (v2.1.0).
+
 For **TDOA**, additionally flag/ignore the GPS second containing a re-tune, or
 discipline only between captures.
 
