@@ -1,7 +1,12 @@
 # Prebuilt bitstreams
 
-Known-good FPGA bitstreams so a firmware build can skip Vivado
-(`docker-run.sh --prebuilt-bit <this .bit> --hwlatch`).
+An older FPGA bitstream, kept for reference.
+
+> ⚠️ **This is not the pinned fleet bitstream.** Its sha256 (`7c0a35e3…174af6f46`) does not match
+> `boards/plutoplus/fpga.sha256pin` (`4c80a8c4…d87d0f`, the `output/working.bit` that v2.0.4–v2.2.0
+> ship), so `docker-run.sh --prebuilt-bit prebuilt/system_top_hwlatch.bit --hwlatch` **fails the pin
+> gate**. To build the fleet firmware, see [`docs/BUILD.md`](../docs/BUILD.md) (*Where
+> `output/working.bit` comes from*).
 
 ## `system_top_hwlatch.bit`
 
@@ -18,7 +23,7 @@ Known-good FPGA bitstreams so a firmware build can skip Vivado
 
 ### How it was built
 
-Natively with **Windows Vivado 2022.2** (`F:\Xilinx`), *not* the Docker container (the
+Natively with **Windows Vivado 2022.2**, *not* the Docker container (the
 container only builds the firmware/rootfs and takes the bitstream via `--prebuilt-bit`):
 
 1. `sardylan/plutoplus` (`fw-0.39`) → `plutosdr-fw` → `hdl` submodule (sardylan's ADI-hdl

@@ -19,7 +19,7 @@ You need this when:
 
 1. A **microSD card** (FAT32).
 2. A Pluto+ **`boot.frm`** — this is **hardware/board specific** and is **not produced by this
-   repo's no‑Vivado build**. Get one that matches your board:
+   repo** (every build makes `pluto.frm` only, with or without Vivado). Get one that matches your board:
    - Best: the **same firmware package you used to make the SD card** (proven to boot your board), **or**
    - A Pluto+ release that includes `boot.frm`, e.g. the full
      [`plutoplus/plutoplus`](https://github.com/plutoplus/plutoplus/releases) release zip
@@ -112,8 +112,8 @@ misbehaves you know which step to look at.
 
 ## After recovery: GPS boot note
 
-Once on the GPS firmware, remember the **U‑Boot autoboot vs GPS NMEA** issue (see the main
-[`README.md`](README.md) *Gotchas*): the first boot on a fresh env must have the **GPS TX (MIO13)
+Once on the GPS firmware, remember the **U‑Boot autoboot vs GPS NMEA** issue (see
+[`docs/GOTCHAS.md`](docs/GOTCHAS.md)): the first boot on a fresh env must have the **GPS TX (MIO13)
 disconnected**, or set `bootdelay=-2` so U‑Boot ignores the incoming NMEA:
 
 ```sh

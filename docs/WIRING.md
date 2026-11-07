@@ -35,7 +35,7 @@ layouts vary by revision, so check your board's pinout).
   alias).
 - **U-Boot console is on UART1** — the GPS NMEA stream will abort autoboot unless `bootdelay=-2`
   is set (the firmware's `S30bootdelay` does this; first boot on a fresh env must have GPS TX
-  disconnected — see [`../README.md`](../README.md) *Gotchas*).
+  disconnected — see [`GOTCHAS.md`](GOTCHAS.md)).
 - **Antenna placement dominates reception.** A receiver next to the Pluto often sees 1–2 satellites
   and never locks; move the antenna away (long-cable active antenna at a window/outside). You need
   **≥4 satellites** for a fix.

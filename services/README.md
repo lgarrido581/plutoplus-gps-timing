@@ -1,16 +1,27 @@
-# `services/` — on-device read-only telemetry
+# `services/` — on-device telemetry and radio control
 
 Server-side services that let a consumer (DistributedSensingNetwork, "DSN") read the
-Pluto's timing / GPS / RF / DMA state **without root SSH or `devmem`**.
+Pluto's timing / GPS / RF / DMA state **without root SSH or `devmem`** (`pluto_zmqd`,
+read-only), and drive the radio — capture, continuous RX stream and TX (`pluto_ctld`,
+write).
 
 | file | role |
 |---|---|
 | `pluto_zmqd.cpp` | the **ZMQ telemetry daemon** (read-only) — aggregates `pps_counter` (devmem mmap) + `xocorrect.log` (`xo_ppm`) + `gpsd` (persistent client) + `ad9361-phy` sysfs (`rf`) + kernel-log scan (`dma`) into JSON, served over **PUB :5560** (1 Hz snapshot) and **REP :5561** (op reads). Contract: [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md). |
 | `S65zmqapi` | init script: launches `pluto_zmqd` bound to **all interfaces** (`0.0.0.0`; override `ZMQ_BIND=<ip>`), after `gpsd` + networking. |
-| `pluto_ctld.cpp` | the **ZMQ capture-control daemon** (WRITE) — tunes the AD9361 and runs a PPS-gated, GPS-anchored IQ capture, returning a SigMF (meta + `ci16_le` IQ) pair over **REP :5562** (`ping`/`capture`). Contract: [`docs/PLUTO_ZMQ_CTL_ICD.md`](../docs/PLUTO_ZMQ_CTL_ICD.md). |
+| `pluto_ctld.cpp` | the **ZMQ radio-control daemon** (WRITE, **no authentication**) on **REP :5562**. Ops: `ping`; `capture` (tune + PPS-gated, GPS-anchored IQ capture → SigMF meta + `ci16_le` IQ pair); `stream_start`/`stream_stop`/`stream_status` (continuous GPS-timed RX to a receiver you name); `tx_load`/`tx_start`/`tx_stop`/`tx_status` (load and transmit a cyclic TX1 waveform); `tdd_status` (axi_tdd gate state). Contract: [`docs/PLUTO_ZMQ_CTL_ICD.md`](../docs/PLUTO_ZMQ_CTL_ICD.md). |
 | `capture_core.c` / `.h` | the capture core called by `pluto_ctld` — a refactor of the validated DSN/sdr-stack `iq_capture.c` (tune + `axi_tdd` PPS-gated arm + single-DMA refill + `pps_counter` anchor), returning meta + IQ **in memory**. |
+| `stream_core.c` / `.h`, `tx_core.c` / `.h`, `iqwire.h` | the continuous RX stream, the cyclic TX, and the stream's binary wire header. |
 | `pps_timestamp.c` / `.h` | GPS anchor from the FPGA `pps_counter` (LATCH/PPS regs). Vendored verbatim from DSN/sdr-stack. |
-| `S66ctld` | init script: launches `pluto_ctld` (REP :5562, `ZMQ_BIND`/`ZMQ_CTL_PORT` overrides), after `S65zmqapi`. |
+| `S66ctld` | init script: launches `pluto_ctld` bound to **all interfaces** (`0.0.0.0`; `ZMQ_BIND`/`ZMQ_CTL_PORT` overrides), after `S65zmqapi`. |
+
+> ⚠️ **Any host that can reach port 5562 can make the radio transmit.** `pluto_ctld` has no
+> authentication and binds `0.0.0.0` by default, so anyone on a network the board is on can
+> retune it, capture, and load and start a TX waveform. Keep the board on a trusted network (or
+> firewall :5562). `ZMQ_BIND` restricts the listen address, but `S66ctld` only reads it from its
+> environment (it sources no config file) and the rootfs is in RAM, so a restart like
+> `ZMQ_BIND=<board-ip> /etc/init.d/S66ctld restart` lasts until the next reboot; to make it stick,
+> change `services/S66ctld` and rebuild. See the ICD's Security section.
 
 ## How it's built
 
@@ -24,11 +35,11 @@ and `S65zmqapi`/`S66ctld` → `/etc/init.d`. Building `pluto_ctld` inside buildr
 the Pluto's own toolchain, sidestepping the glibc-≤2.25 cross-build the standalone
 `iq_capture` needs.
 
-`services/` is mounted at `/build/services-src` by `docker-run.sh`. A normal base build
+`services/` is mounted at `/build/services-src` by `docker-run.sh`. A normal build
 picks it up automatically:
 
 ```sh
-bash docker-run.sh        # -> output/pluto.frm  (no Vivado needed)
+bash docker-run.sh        # -> output/pluto.frm  (no Vivado; reuses output/working.bit, see docs/BUILD.md)
 ```
 
 ## Test on a running radio (no reflash)
@@ -47,5 +58,6 @@ Notes:
 - `gps` reuses the exact `dsn.health/1` field names, so DSN's `NodeStatus`
   parser is transport-agnostic between this and HTTP `/health`.
 - `dma` is **best-effort** (heuristic kernel-log scan; a non-logging wedge reads OK).
-- Capture/retune are deliberately **not** here — they are v2 on a separate authed
-  socket. See [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md).
+- `pluto_zmqd` itself never captures, retunes or writes registers; those ops are on
+  `pluto_ctld` (:5562, unauthenticated — see the warning above). See
+  [`docs/PLUTO_ZMQ_API.md`](../docs/PLUTO_ZMQ_API.md).

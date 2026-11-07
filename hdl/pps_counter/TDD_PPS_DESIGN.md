@@ -4,8 +4,9 @@ Tie the AD936x **TDD frame timing to GPS** by adding a PPS-reset frame counter i
 node's TX/RX windows start on the same GPS-second boundary. This extends `pps_counter` (which already
 has the synchronized PPS edge + the `l_clk` counter) rather than adding a new IP.
 
-> Status: **proposal — not yet built.** Needs the Vivado HDL build (see [build-environment]). Review
-> the register map + the two open decisions below before I implement.
+> Status: **built.** The frame counter and registers below are in `pps_counter.v`; see "As built
+> (v1.4)" and "As built (coincident capture)" for how it is used today. The sections before them
+> are the original proposal, kept as the design record.
 
 ## Why this works for a multi-node network
 
@@ -38,7 +39,10 @@ has the synchronized PPS edge + the `l_clk` counter) rather than adding a new IP
 - Gated by a new `TDD_CTRL.enable`; when disabled the outputs are inert and the existing counter/latch
   behavior is unchanged (fully backward compatible).
 
-## Register map extension (same AXI slave; 0x1C–0x3C are free today)
+## Register map extension (same AXI slave; 0x1C–0x38)
+
+(At proposal time 0x1C–0x3C were free. 0x3C/0x40 have since been taken by the DMA-start latch,
+`LATCH_COUNT`/`LATCH_SEQ` — see the `pps_counter.v` header.)
 
 | Off | Name | R/W | Meaning |
 |---|---|---|---|
@@ -107,12 +111,28 @@ working, the RX-DMA `sync` becomes the **OR** of both:
 adc_dma/sync = axi_tdd/tdd_channel_1  |  pps_counter/tdd_enable
 ```
 
-- **Streaming RX:** `axi_tdd` open (full-frame window, always HIGH) dominates the OR → RX free-runs.
-  Boot-safe: needs no `pps_counter` config (it powers up inert with `tdd_enable = 0`).
-- **GPS-gated capture:** software disables `axi_tdd` (which latches `tdd_channel_1` LOW) and programs
-  `pps_counter`'s window (`TDD_CTRL = enable|pps_sync_en|drive_pins`, plus `FRAME_LEN`/`RX_START`/
-  `RX_STOP`). The OR then passes `tdd_enable` — a PPS-anchored window — so `sample[0]` lands on a common
-  GPS edge across nodes. The DMA-start latch observes the OR output, so `LATCH_COUNT` stays sample-exact.
+- **Streaming RX:** `tdd_channel_1` is held HIGH, which dominates the OR → RX free-runs. Since v2.1.0
+  that HIGH comes from the channel's polarity, not a window: channel 1 off at polarity 1, latched
+  across an `axi_tdd` `enable` 0 → 1 (`restore_rx_mode` in `services/capture_core.c`). A full-open
+  window (on 0, off = frame) does not hold it: enabled without a sync the core sits ARMED with every
+  channel LOW. After boot the synthesis-default polarity is already HIGH. Boot-safe: needs no
+  `pps_counter` config (it powers up inert with `tdd_enable = 0`).
+- **GPS-gated capture** (`capture_core.c` + `services/pps_timestamp.c`):
+  1. Latch `tdd_channel_1` LOW: disable `axi_tdd`, set channel 1 off at polarity 0, run the core
+     once (`enable` 0 → 1) and disable it again (`configure_tdd`). A core left RUNNING by a sync is
+     parked first.
+  2. Program `pps_counter`'s window held: `TDD_CTRL = 0x3` (`enable|pps_sync_en`, `drive_pins`
+     clear) plus `FRAME_LEN`/`RX_START`/`RX_STOP` (`pps_ts_config_frame`). The frame runs PPS-locked,
+     but `tdd_enable` stays LOW.
+  3. Create the DMA buffer, which queues behind the LOW gate.
+  4. In the second before the gated edge, once that second's window has closed, set `drive_pins`
+     (`TDD_CTRL = 0x7`), checked against `FRAME_POS` before and after the write
+     (`pps_ts_drive_in_gap`).
+
+  The next rising edge of the OR is then the gated PPS window, so `sample[0]` lands on a common GPS
+  edge across nodes. (Writing `0x7` in one step, as first built, let a buffer queued while a window
+  was already open start at once: `axi_dmac` starts on the sync *level*.) The DMA-start latch
+  observes the OR output, so `LATCH_COUNT` stays sample-exact.
 - Drive `tdd_enable` only as a **level** (an RX window). Driving the RX-DMA sync from a 1-cycle pulse
   (`tdd_sync`) starves the DMA and breaks RX.
 

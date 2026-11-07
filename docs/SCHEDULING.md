@@ -1,5 +1,15 @@
 # GPS-scheduled TX/RX — PPS-synced TDD + compare-trigger
 
+> **Historical design note (2026-06-19) — not implemented as written.** What shipped instead:
+> - **Path A** became the `pps_tick → axi_tdd/sync_in` wire. Without `sync_reset`, `axi_tdd` syncs
+>   only once, at enable, so it does not re-lock each PPS. GPS-gated RX uses `pps_counter`'s own
+>   PPS-reset window, ORed into the RX-DMA sync (`hdl/pps_counter/TDD_PPS_DESIGN.md`).
+> - **Path B's compare-trigger was never built.** The offsets it proposes, 0x1C/0x20/0x24, are now
+>   `TDD_CTRL`/`FRAME_LEN`/`RX_START` (see the `pps_counter.v` header). **Do not run the `devmem`
+>   recipe below:** writing those offsets reprograms the PPS window that gates RX captures.
+>
+> Kept for the design reasoning and the coherence discussion.
+
 Design note for deterministic, GPS-aligned capture and waveform playback,
 coordinated across nodes. Builds on the `pps_counter` (v1.3) and the Pluto's
 existing `axi_tdd` core. ADI TDD reference:
@@ -35,11 +45,15 @@ ad_connect pps_ext  axi_tdd_0/sync_in     # GPS PPS re-arms the frame every seco
 
 For "fire once at absolute GPS time T," add a compare to the existing IP:
 
-| offset | reg | bits |
+> ⚠️ **Superseded offsets.** 0x1C/0x20/0x24 below were free when this was written; they are now
+> `TDD_CTRL`/`FRAME_LEN`/`RX_START`. A compare-trigger built today would need new offsets above
+> 0x40 (`LATCH_SEQ`). Not implemented.
+
+| offset (proposed, now taken) | reg | bits |
 |---|---|---|
-| 0x1C | `TARGET`    | RW — sample count to fire at (GPS-anchored) |
-| 0x20 | `TRIG_CTRL` | RW — bit0 `arm`, bit1 `mode` (0=one-shot, 1=periodic) |
-| 0x24 | `TRIG_STAT` | RO — bit0 `fired` |
+| ~~0x1C~~ | `TARGET`    | RW — sample count to fire at (GPS-anchored) |
+| ~~0x20~~ | `TRIG_CTRL` | RW — bit0 `arm`, bit1 `mode` (0=one-shot, 1=periodic) |
+| ~~0x24~~ | `TRIG_STAT` | RO — bit0 `fired` |
 
 Logic (cnt_clk domain): when `arm && counter == TARGET`, emit a 1-sample trigger
 pulse → route to `axi_ad9361_dac_dma/sync` (TX start), `axi_tdd_0/sync_in`, or a
@@ -47,6 +61,7 @@ pin; set `fired`; auto-disarm in one-shot mode.
 
 Userspace:
 ```sh
+# PSEUDOCODE for the unbuilt compare-trigger -- do NOT run against today's offsets
 # transmit/playback at GPS time = now + offset_s
 TARGET = PPS_COUNT + round(offset_s * PPS_DELTA)   # PPS_DELTA = measured samples/sec
 devmem TARGET ; devmem TRIG_CTRL = arm

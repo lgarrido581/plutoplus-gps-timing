@@ -32,12 +32,15 @@ ship in the release.**
 ## Release checklist
 
 1. `git` tree clean; CI green on the release commit.
-2. Build the artifact(s) with the **full** build: Pluto+ `docker-run.sh --vivado <path> --hwlatch`;
-   LibreSDR per `docs/LIBRESDR.md`. **Do NOT release a `--prebuilt-bit` build.** v2.0.1 shipped broken
-   from exactly that shortcut: the injected bitstream was a **truncated 241 KB extract of the real 964 KB
-   bit** (the `fdt` pip lib silently truncates large `data` props), so the PL couldn't configure → brick.
-   `--prebuilt-bit` is a **dev-iteration** convenience only; a tagged artifact is always a full `--vivado`
-   build that synthesizes the real bitstream.
+2. Build the artifact(s). **Pluto+, no gateware change (the normal case):** a bare `docker-run.sh`,
+   which reuses the pinned `output/working.bit` (= `--prebuilt-bit output/working.bit --hwlatch`); the
+   build fails unless `fpga@1` matches the sha256 in `boards/plutoplus/fpga.sha256pin`. v2.1.0 and v2.2.0
+   shipped this way. **Gateware change:** `docker-run.sh --vivado <path> --hwlatch`, validate the new bit
+   on hardware, then update `output/working.bit` and the pin in the same commit. LibreSDR per
+   `docs/LIBRESDR.md`. Never inject any other bitstream: v2.0.1 shipped broken from a `--prebuilt-bit`
+   build fed a **truncated 241 KB extract of the real 964 KB bit** (the `fdt` pip lib silently truncates
+   large `data` props), so the PL couldn't configure → brick. The pin gate now rejects that on the reuse
+   path.
 3. **Verify the built artifact:** `sh test/check_frm_images.sh output/pluto.frm [prev-release.frm]` — it
    measures each `fpga@1`/kernel/ramdisk image by parsing the FIT's flattened device tree directly in
    python3 (the authoritative `FDT_PROP` length field — never the `fdt` pip lib, which truncates, and
@@ -48,15 +51,19 @@ ship in the release.**
 4. **Flash each board with `update_frm.sh` / `flash_frm.py`, then run `smoke_test.py` → `SMOKE PASS`.**
    - The flash MUST set `fit_size` (U-Boot reads exactly `fit_size` bytes of the FIT at boot; a stale
      value = truncated FIT = brick). `flash_frm.py` delegates to the board's `update_frm.sh` and asserts
-     `fit_size` matches the new image — never hand-roll a `flashcp`. See `FLASHING.md`.
+     `fit_size` matches the new image — never hand-roll a `flashcp`. See `FLASHING.md`. (LibreSDR:
+     `flash_libresdr_qspi.py` does a bare `flashcp`; whether that is safe on LibreSDR is unverified —
+     see the caution in `FLASHING.md`.)
    - After flashing, sanity-check on the board: `fw_printenv fit_size` == the new FIT.itb size (`.frm`
      bytes − 33, as `printf %X`), and the mtd3 FIT header `totalsize` matches it.
    - Paste the `smoke_test.py` output into the release notes.
-5. Tag `vX.Y.Z`, push the tag, create the release, attach each board's `.frm`.
-6. Bitstream unchanged but rootfs fixed (like v2.0→v2.0.1)? Say so. The `fpga@1` sha need not be
-   bit-identical across a fresh `--vivado` synth (it re-synthesizes), but it must be the **same HDL** —
-   note the `hdl/` commit. The proof the delta is only what you intended is the diff of the release
-   commits plus `SMOKE PASS` on the new artifact, not a byte-identical bitstream.
+5. Tag `vX.Y.Z`, push the tag, create the release, attach the `.frm` of each board the release
+   carries (say which in the CHANGELOG; v2.2.0 is Pluto+-only). `release_firmware.sh` attaches
+   `output/libre.frm` whenever it exists — delete or rebuild a stale one first.
+6. Bitstream unchanged (the reuse path)? Say so and quote the `fpga@1` sha256, which equals the pin.
+   After a `--vivado` re-synthesis the sha changes even for the same HDL, so note the `hdl/` commit.
+   The proof the delta is only what you intended is the diff of the release commits plus `SMOKE PASS`
+   on the new artifact.
 
 ## Versioning
 - New board / breaking change → bump **major** (v1→v2).

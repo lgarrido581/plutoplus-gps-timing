@@ -14,8 +14,10 @@
 //
 // Register map (AXI4-Lite, 32-bit words, offset from base):
 //   0x00 ID        RO  0x50505343 ("PPSC")
-//   0x04 CTRL      RW  bit0 enable(1=run, default 1), bit1 clear(self-clearing)
-//   0x08 STATUS    RO  bit0 pps_present(1 if >=1 PPS edge seen)
+//   0x04 CTRL      RW  bit0 enable(1=run, default 1), bit1 clear(self-clearing, reads 0),
+//                      bits[5:4] gpio_out (I/O-voltage test outputs; default 0)
+//   0x08 STATUS    RO  bit0 pps_present = (PPS_SEQ != 0): >=1 PPS edge since reset
+//                      (sticky -- not liveness; watch PPS_SEQ advance for that)
 //   0x0C LIVE_COUNT RO current free-running counter (CDC-synced snapshot)
 //   0x10 PPS_COUNT RO  counter latched at the last PPS rising edge
 //   0x14 PPS_DELTA RO  PPS_COUNT(n) - PPS_COUNT(n-1)  (== cnt_clk Hz when locked)
@@ -31,6 +33,12 @@
 //   0x34 FRAME_POS RO  live frame counter (CDC-synced)
 //   0x38 FRAME_SEQ RO  frames elapsed since the last PPS (confirms FRAME_LEN divides the second)
 //   Configure while TDD disabled (TDD_CTRL.enable=0), then enable (CDC contract).
+//   --- DMA-start latch (latch_trig = the RX-DMA sync) ---
+//   0x3C LATCH_COUNT RO counter latched at the last latch_trig rising edge
+//                      (= cnt_clk count of sample[0] of a gated capture)
+//   0x40 LATCH_SEQ RO  number of latch_trig rising edges observed
+//   Unlisted offsets in 0x00-0x7C read 0. (Images built before LATCH_* used a 6-bit
+//   decode, so there 0x40 aliases 0x00 and reads the ID.)
 //
 // Notes:
 //   * 32-bit counter wraps ~107 s at 40 MHz / ~43 s at 100 MHz; far longer than
@@ -48,8 +56,9 @@ module pps_counter #(
     input  wire                              cnt_clk,     // e.g. AD936x sample clk
     input  wire                              cnt_resetn,  // active-low reset
     input  wire                              pps_in,      // optional PPS (tie 0 if unused)
-    // DMA-start latch trigger: wire to axi_tdd tdd_channel_1 (= the RX-DMA sync =
-    // the transfer-start level). A rising edge latches the free-run counter ->
+    // DMA-start latch trigger: wire to the RX-DMA sync itself (= the transfer-start
+    // level; on Pluto+ the dma_sync_or/Res output, axi_tdd tdd_channel_1 | tdd_enable,
+    // see docker-build-inner.sh). A rising edge latches the free-run counter ->
     // LATCH_COUNT (0x3C) = the exact cnt_clk count of sample[0] of a TDD-gated
     // capture, with NO host read race. Pure observe (a fan-out load) -> never gates
     // the DMA, so it cannot wedge RX. Tie 0 if unused. Same cnt_clk domain (no CDC).
@@ -335,8 +344,8 @@ module pps_counter #(
 
     // ----------------------------------------------------------------- //
     // DMA-start latch: capture `counter` on a rising edge of latch_trig
-    // (= axi_tdd tdd_channel_1 = the RX-DMA sync). latch_count then holds the
-    // exact cnt_clk count of the capture's first sample. tdd_channel_1 is in the
+    // (= the RX-DMA sync, dma_sync_or/Res on Pluto+). latch_count then holds the
+    // exact cnt_clk count of the capture's first sample. Both OR inputs are in the
     // cnt_clk (l_clk) domain, so the capture is glitch-free, same-domain. The
     // value changes only on a capture (<=1/frame) -> simple 2-FF sync to AXI like
     // pps_count. latch_seq increments per latch so the host can tell it is fresh.

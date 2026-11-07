@@ -8,15 +8,16 @@ Priorities are ordered roughly by impact-for-effort.
 
 ## Timing resiliency
 
-- **Holdover handling.** Today there is *no holdover*: lose GPS and the timing
-  anchor + discipline are gone within seconds (and `xo_correct.sh` blocks waiting
-  for PPS edges that stop coming).
-  - Detect GPS/PPS loss → **freeze `xo_correction` at the last good value** (don't
-    let it wander) and **flag the node's timestamps as `degraded`** so the fusion
-    layer can downweight or drop it.
+- **Holdover handling.** Basic holdover shipped in v1.5, but the on-board TCXO
+  only holds fine timing for ~seconds after GPS loss, so it flags the loss rather
+  than riding through it.
+  - ✅ *(done, v1.5)* Detect GPS/PPS loss → `xo_correct.sh` **freezes
+    `xo_correction` at the last good value** and publishes `HOLDOVER_GOOD →
+    HOLDOVER_DEGRADED → INVALID` (by elapsed time) to `/run/xo_state`, so the
+    fusion layer can downweight or drop the node.
   - Bound the *usable* holdover window from the measured **Allan deviation**
-    (already captured in `metrics/`): e.g. "good to ±X ns for Y seconds after GPS
-    loss," then mark `invalid`.
+    (already captured in `metrics/`): set `HOLD_GOOD_S`/`HOLD_INVALID_S` per node
+    from it, e.g. "good to ±X ns for Y seconds after GPS loss."
   - *Hardware path:* feed an external **OCXO/Rb 10 MHz + 1PPS** (a real GPSDO)
     into the Pluto+ external-reference input for genuine holdover and lab-grade
     short-term stability — see *Hardware upgrade paths*.
@@ -43,9 +44,8 @@ Priorities are ordered roughly by impact-for-effort.
 
 ## Node robustness
 
-- **`xo_correct` watchdog.** Add a timeout so a stalled PPS doesn't hang the
-  daemon — re-enter the "wait for PPS lock" state and resume cleanly. (Pairs with
-  the holdover freeze above.)
+- ✅ **`xo_correct` watchdog** *(done, v1.5)*. A stalled PPS no longer hangs the
+  daemon: after `PPS_TIMEOUT` it enters holdover, and re-acquires when PPS returns.
 - **Hardware watchdog (Zynq WDT).** Auto-reboot if userspace wedges — important
   for an unattended field node.
 - **Brick-resistance.** The unprotected QSPI is the #1 fragility. Keep a
@@ -89,10 +89,10 @@ Priorities are ordered roughly by impact-for-effort.
 
 ## GPS-scheduled TX/RX & coordination
 
-- 🔧 **PPS-synced TDD** *(in flight)* — `pps_counter` gained a PPS-reset frame counter
-  + a `pps_tick` output now driving `axi_tdd_0/sync_in`, so the (already DMA-gating)
-  TDD frame is GPS-aligned. RTL + BD rewire done; feature build running. *Remaining:*
-  on-device config/verify tooling + a two-node alignment test.
+- ✅ **PPS-synced TDD** *(shipped, v1.4)* — `pps_counter` gained a PPS-reset frame
+  counter + a `pps_tick` output driving `axi_tdd_0/sync_in`; captures gate on
+  `pps_counter`'s frame. `tdd_verify.sh` validated it on hardware. *Remaining:* a
+  two-node alignment test at ns/sample precision (scope or cross-correlation).
 - **Compare-trigger IP** — extend `pps_counter` with a `TARGET`/`arm` compare that
   fires at an absolute GPS sample-time → one-shot scheduled events (two-way
   ranging, "TX at 12:00:00.000 GPS"). *(small new HDL)*
@@ -121,9 +121,11 @@ show the gap.
 - **Commit the working tree.** Big batch of verified-but-uncommitted work (Dockerfile
   toolchain fix, `xo_correct` rewrite, TDD RTL + BD wiring, `--prebuilt-bit`, build
   bugfix, docs). Branch, commit in logical chunks, tag a release.
-- **CI / regression guard** *(none today)*. Minimum on PR: `bash -n`/shellcheck the
-  `.sh` files + `xvlog` lint `pps_counter.v`. Stretch: an out-of-context `synth_design`
-  smoke test. Either would have caught the `pipefail` bug.
+- ✅ **CI / regression guard** — `.github/workflows/ci.yml` runs `test/run_ci.sh` on
+  every PR (`sh -n` + shellcheck, the libiio return-contract check, `-Werror` +
+  cppcheck on `services/`, Python and model tests; see `RELEASING.md`). *Remaining:*
+  the `xvlog` lint of `pps_counter.v` is skipped on the CI runner (no Vivado). Stretch:
+  an out-of-context `synth_design` smoke test.
 - **Toolchain source is a 3rd-party image.** Dockerfile now pulls gcc-linaro from
   `azureiotedge/...`. Pin it by digest and document a fallback, or vendor the tarball
   (release asset / git-lfs) so a single deleted image can't break all builds.

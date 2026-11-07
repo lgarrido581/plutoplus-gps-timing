@@ -5,15 +5,22 @@ Scripts for building a GPS‑synchronized, multi‑node TDOA network from GPS‑
 ## ⚠️ Key fact about Pluto timestamps
 
 The Pluto's IQ stream has **no hardware‑embedded per‑sample timestamp** — it's raw interleaved
-`int16` I/Q. A "timestamp" is something you **attach in software at capture time**, stamped from the
-(GPS‑disciplined) system clock. Two limits follow:
+`int16` I/Q. The two scripts below **attach a timestamp in software at capture time**, stamped from
+the (GPS‑disciplined) system clock. Two limits follow for them:
 
 1. **System clock ≠ sample clock.** chrony/PPS disciplines `CLOCK_REALTIME`, *not* the AD9363 sample
-   clock (a free‑running 40 MHz TCXO). For TDOA you also need to **frequency‑lock the sample clock**
-   to GPS (feed a GPSDO 10 MHz into the Pluto+ external reference input).
+   clock (a 40 MHz TCXO). For TDOA the sample clock must also be **frequency‑locked to GPS**. The
+   `--hwlatch` firmware (the default build) does this in software: `xo_correct.sh` steers it from the
+   FPGA `pps_counter` (TCXO‑class, ~2e‑8 @1 s). A GPSDO into the external reference input is an
+   upgrade for stability and holdover, not a requirement.
 2. **USB jitter.** Software buffer‑arrival timestamps are jittery at the ms level — fine for coarse
    capture windowing, useless for fine TDOA (1 µs ≈ 300 m). Fine alignment needs a **PPS marker
    injected into RX** or a **shared reference signal** cross‑correlated across nodes.
+
+For sample‑level timing, use `pluto_ctld`'s `capture` instead of these scripts: it stamps sample 0
+with the GPS time the FPGA `pps_counter` latched at DMA start (`gpsanchor:gps_ns0`, ±1‑sample
+quantization) — see [`docs/PLUTO_ZMQ_CTL_ICD.md`](../docs/PLUTO_ZMQ_CTL_ICD.md). Cross‑node
+validation (T2/T3 below) still applies.
 
 ## Scripts
 
@@ -39,7 +46,8 @@ iq = raw[0::2] + 1j * raw[1::2]
 
 ## Roadmap (see top-level discussion)
 
-1. **Frequency lock** each node's sample clock to GPS (GPSDO 10 MHz → Pluto+ ext ref). *Essential.*
+1. **Frequency lock** each node's sample clock to GPS — done in firmware (`xo_correct.sh`,
+   `--hwlatch`); a GPSDO → Pluto+ ext ref is the optional upgrade.
 2. **Coarse time sync** — GPS/PPS/chrony (done) → all nodes capture the same GPS‑second window.
 3. **Fine alignment** — cross‑correlate a shared reference signal (à la RTL‑SDR‑TDOA) to remove
    residual inter‑node offset, then cross‑correlate the target → TDOA → multilateration.
@@ -49,11 +57,11 @@ iq = raw[0::2] + 1j * raw[1::2]
 - **T2 — absolute timestamp accuracy:** inject GPS PPS (or a PPS‑gated burst) into RX, find its
   sample index, compare its computed time to the GPS whole‑second. Error = timestamp accuracy.
 - **T3 — two‑node coherence:** feed both Plutos the same signal; cross‑correlate → measured TDOA
-  should be ~0 and *stable* (drifts without the GPSDO lock, holds with it).
+  should be ~0 and *stable* (drifts without the sample‑clock lock, holds with it).
 
-## GPSDO / frequency-reference hardware (Phase 1 — future testing)
+## GPSDO / frequency-reference hardware (optional upgrade — future testing)
 
-For frequency lock, feed a GPS-disciplined reference into the **Pluto+ external clock input**. A
+For a better frequency reference than the disciplined TCXO (short‑term stability, holdover), feed a GPS-disciplined reference into the **Pluto+ external clock input**. A
 **GPSDO** gives you a disciplined frequency **and** a 1 PPS in one unit. Candidates to evaluate:
 
 | Option | Provides | Notes |

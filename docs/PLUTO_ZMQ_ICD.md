@@ -10,8 +10,10 @@
 | **Status** | Implemented, built, and **hardware-validated** end-to-end (§13) |
 | **Source of truth** | `services/pluto_zmqd.cpp`. This ICD documents that binary as built. |
 
-This ICD is the **authoritative wire specification**. `docs/PLUTO_ZMQ_API.md` is the
-companion design/integration overview (rationale, quickstart, test procedure).
+This ICD is the **authoritative wire specification** for the telemetry sockets
+(`:5560`/`:5561`). `docs/PLUTO_ZMQ_API.md` is the companion design/integration overview
+(rationale, quickstart, test procedure); where they differ, this ICD wins. The `:5562`
+capture-control socket is specified separately in `docs/PLUTO_ZMQ_CTL_ICD.md`.
 
 ---
 
@@ -19,12 +21,14 @@ companion design/integration overview (rationale, quickstart, test procedure).
 
 Defines the read-only interface by which a consumer obtains the Pluto's **timing, GPS,
 RF, and DMA-health** state without root SSH/`devmem`/`gpspipe`. Out of scope: IQ
-capture, any control/retune/write operation (those are a separate, authenticated v2
-interface — **this interface performs no writes of any kind**).
+capture, any control/retune/write operation — **this interface performs no writes of
+any kind**. Those are `pluto_ctld` on `:5562` (`docs/PLUTO_ZMQ_CTL_ICD.md`), a separate
+socket with **no authentication**; its bind is set by `ZMQ_BIND` in `services/S66ctld`.
 
 ## 2. Reference documents
 
 - `docs/PLUTO_ZMQ_API.md` — design overview, rationale, quickstart, test procedure.
+- `docs/PLUTO_ZMQ_CTL_ICD.md` — the `:5562` capture/stream/TX control interface.
 - `dsn.health/1` — the DSN health contract whose `timing`+`gps` field names this
   interface reuses verbatim (a DSN `NodeStatus.from_health_json()` parses either).
 - ZMTP/3.0 — ZeroMQ Message Transport Protocol (libzmq wire framing).
@@ -36,7 +40,7 @@ interface — **this interface performs no writes of any kind**).
 | **snapshot** | a complete JSON object carrying all four telemetry blocks |
 | **block** | one of `timing`, `gps`, `rf`, `dma` |
 | **stale** | a GPS report not refreshed by gpsd within `GPS_STALE_MS` (5000 ms) |
-| **counter** | the FPGA `pps_counter` AXI peripheral (present only on `--hwlatch` bitstreams) |
+| **counter** | the FPGA `pps_counter` AXI peripheral (in bitstreams built by this repo; it sees the GPS PPS only on `--hwlatch` builds, which route it to F20) |
 | **null** | JSON `null` — value is unknown/unavailable, distinct from absent key |
 
 ## 4. Transport & connection
@@ -111,6 +115,7 @@ Request body is **either** a JSON object `{"op":"<name>"}` **or** a bare op word
 |---|---|---|---|---|---|
 | `schema` | string | — | no | yes | Constant `"dsn.health/1"` (timing+gps field compatibility). |
 | `api` | string | — | no | yes | Constant `"dsn.pluto_zmq/1"` (this interface + version). |
+| `fw_version` | string | — | no | yes | Firmware release baked in at build time (the repo `VERSION`, e.g. `"2.2.0"`); `"unknown"` if the build did not set it. Full snapshot only — not in the per-block REP replies (§5.2). |
 | `node_id` | string | — | no | yes | Hostname; default `"pluto"`. |
 | `board` | string | — | no | yes | Hardware target: `"plutoplus"` or `"libresdr"`. |
 | `t_unix` | integer | s | no | yes | Provider wall-clock at emit (UNIX seconds, UTC). |
@@ -127,16 +132,27 @@ Source: FPGA `pps_counter` AXI registers via `/dev/mem` mmap @ `0x7C460000`, and
 
 | Field | Type | Units | Null when | Range | Source |
 |---|---|---|---|---|---|
-| `pps_present` | boolean | — | never (false if no counter) | — | STATUS reg `0x7C460008` bit0 |
-| `pps_advancing` | boolean \| null | — | until 2 PUB ticks elapse, or no counter | — | SEQ increased over the last 1 Hz tick |
+| `pps_present` | boolean | — | never (false if no counter) | — | STATUS reg `0x7C460008` bit0 = `PPS_SEQ != 0` (sticky; see note) |
+| `pps_advancing` | boolean \| null | — | until the second 1 Hz tick, or no counter | — | `true` while SEQ has changed within the last 2.5 s, `false` once frozen longer (see note) |
 | `pps_seq` | integer \| null | count | no counter | 0…2³²−1 (wraps) | SEQ reg `0x7C460018` |
 | `xo_ppm` | number \| null | ppm | no `xocorrect.log` value | ~ −50…+50 | last logged xo_correction error |
-| `cnt_clk_hz` | integer \| null | Hz | no counter | ≈ AD9361 `l_clk` | DELTA reg `0x7C460014`: `l_clk` ticks counted in one PPS second (see note) |
+| `cnt_clk_hz` | integer \| null | Hz | no counter | ≈ AD9361 `l_clk`; `0` before the first PPS | DELTA reg `0x7C460014`: `l_clk` ticks counted in one PPS second (see note) |
 
-Notes: `pps_present` is true only on a `--hwlatch` bitstream after the GPS PPS reaches
-F20. On a base (no-counter) build, `pps_present=false` and the three numeric fields are
-`null`. `pps_advancing` is computed only on the 1 Hz tick (a sub-second REP reports the
-cached verdict but reads `pps_present`/`pps_seq`/`cnt_clk_hz` live).
+Notes: `pps_present` is the RTL's `pps_seq != 0` — at least one PPS edge since the FPGA
+came up. It is **sticky**: it stays `true` after the PPS stops, so it is not a liveness
+signal; use `pps_advancing`. It is `true` only on a `--hwlatch` bitstream after the GPS
+PPS reaches F20. On a base (no-counter) build, `pps_present=false` and the three numeric
+fields are `null`. On a counter build before the first PPS edge, `pps_present=false`,
+`pps_seq=0` and `cnt_clk_hz=0` (not `null`: DELTA resets to 0); the first edge's DELTA
+counts from FPGA reset, so `cnt_clk_hz` is meaningful from the second edge on.
+
+`pps_advancing` is time-based, recomputed only on the 1 Hz tick (a sub-second REP
+reports the cached verdict but reads `pps_present`/`pps_seq`/`cnt_clk_hz` live). The
+first tick only records SEQ (`null`); after that it is `true` while SEQ has moved within
+the last 2.5 s and `false` once SEQ has been frozen for longer — so one tick that lands
+in the same PPS second as the previous one does not read as a dead PPS. The 2.5 s also
+runs from that first sample, so with no PPS at all it reads `true` for up to ~2.5 s
+after the daemon starts, then `false`.
 
 `cnt_clk_hz` is the counter's clock — the AD936x `l_clk` (data-path clock) — counted
 over one GPS PPS second, i.e. the `l_clk` **frequency in Hz**. It is the data clock, a
@@ -268,8 +284,8 @@ REP (request → reply):
 PUB (one 1 Hz frame; subscriber uses an empty subscription):
 
 ```
-{"schema":"dsn.health/1","api":"dsn.pluto_zmq/1","node_id":"pluto","t_unix":1750000000,
- "uptime_s":12345,
+{"schema":"dsn.health/1","api":"dsn.pluto_zmq/1","fw_version":"2.2.0","node_id":"pluto",
+ "board":"plutoplus","t_unix":1750000000,"uptime_s":12345,
  "timing":{"pps_present":true,"pps_advancing":true,"pps_seq":42,"xo_ppm":0.0,"cnt_clk_hz":61440000},
  "gps":{"mode":3,"lat_deg":37.1234567,"lon_deg":-122.7654321,"alt_hae_m":42.7,"alt_msl_m":75.3,
         "geoid_sep_m":-32.6,"eph_m":3.1,"epv_m":5.4,"n_sat_used":9,"speed_mps":0.03,"track_deg":118.2,"climb_mps":0.0},

@@ -14,13 +14,15 @@ drag-and-drop needed. Validated end-to-end (uptime resets, RX + GPS come back).
 ```sh
 pip install paramiko          # once
 python flash_frm.py output/pluto.frm
-#   --host 192.168.50.30       # if pluto.local doesn't resolve
+#   --host <board-ip>          # if pluto.local doesn't resolve
 #   --no-reboot                # flash now, reboot later
 ```
 It transfers the `.frm`, **verifies the md5 on the board before touching flash**,
 runs the board's `update_frm.sh` to flash it (which **also sets `fit_size`** — see
-below), **asserts `fit_size` matches the new image**, reboots, and confirms `uptime`
-reset + RX works. It **aborts** on any mismatch.
+below), **asserts `fit_size` matches the new image**, and reboots. It **aborts** on an
+md5, `update_frm.sh` or `fit_size` mismatch. After the reboot it only *prints* `uptime`,
+PPS state (`pps_present`, PPS advancing) and — if `pyzmq` is installed — `dma.rx_ok`;
+it does not fail on them, so read them.
 
 ## Why this is safe — and the `fit_size` gotcha that can brick you
 - It writes **only `mtd3` (`qspi-linux`)** — the FIT image (kernel + dtb + rootfs +
@@ -38,6 +40,13 @@ reset + RX works. It **aborts** on any mismatch.
   which is what `flash_frm.py` does — never hand-roll a `flashcp`.
 - The **md5-before-flash check** guards transfer integrity; the **`fit_size` assert**
   guards bootability. Both must pass before reboot.
+- ⚠️ **LibreSDR: unverified.** `flash_libresdr_qspi.py` writes `libre.frm` with a bare
+  `flashcp -v` and does **not** set `fit_size`. Nothing in this repo shows whether the
+  LibreSDR U-Boot reads `fit_size` bytes or a fixed size at QSPI boot (its environment is
+  generated during the build and not committed). Until that is checked, run
+  `fw_printenv | grep -E 'fit_size|sf read'` on the board before rebooting: if the QSPI boot
+  reads `${fit_size}` and `fit_size` is smaller than the new FIT (`.frm` bytes − 33), the same
+  truncation applies — don't reboot. See [`docs/LIBRESDR_QSPI.md`](docs/LIBRESDR_QSPI.md).
 
 ## Manual sequence (what the script does)
 ```sh
@@ -66,23 +75,26 @@ ssh root@pluto.local 'sync; /sbin/reboot'
 
 # 6. (host) after ~20-30 s, verify it came back + RX works
 #    NOTE: pluto.local mDNS is often slow to re-register after a reboot --
-#    the board is also reachable at its GPS-firmware static IP 192.168.50.30.
-ssh root@192.168.50.30 'uptime; devmem 0x7C460008 32'
+#    use the board's eth0 IPv4 address instead. This firmware sets no static IP:
+#    eth0 takes the U-Boot env `ipaddr_eth` if you set one, otherwise whatever the
+#    network gives it (DHCP, or only a 169.254 link-local -- see docs/NTP.md).
+ssh root@<board-ip> 'uptime; devmem 0x7C460008 32'
 #   expect: uptime "up 0 min", pps_present 0x1. Then run the release gate:
-#   python tools/smoke_test.py --host 192.168.50.30 --board plutoplus
+#   python tools/smoke_test.py --host <board-ip> --board plutoplus
 ```
 
 ## Post-flash validation (quick checklist)
 
-`flash_frm.py` already asserts the flash landed (`fit_size`), that PPS is live, and — if
-`pyzmq` is available — `dma.rx_ok`. For a manual once-over (`root`/`analog`, `<board-ip>` =
-`pluto.local` / `192.168.50.30` / usb `192.168.2.1`), confirm:
+`flash_frm.py` already asserts the flash landed (`fit_size`), and after the reboot prints
+PPS state and — if `pyzmq` is available — `dma.rx_ok` (printed, not asserted: check them).
+For a manual once-over (`root`/`analog`, `<board-ip>` = `pluto.local` / the board's eth0
+address / usb `192.168.2.1`), confirm:
 
 ```sh
 uname -a                         # NEW build date/#N -> the flash took (not the old rootfs)
 fw_printenv mode                 # channel mode preserved (e.g. 2r2t)
 fw_printenv fit_size             # == new FIT.itb size (.frm bytes - 33, printf %X)
-devmem 0x7C460000 32             # pps_counter ID -> 0x50505343 ("PSC"): the timing core is present
+devmem 0x7C460000 32             # pps_counter ID -> 0x50505343 ("PPSC"): the timing core is present
 devmem 0x7C460040 32             # latch SEQ -> a real count that advances per capture, NOT 0x50505343
                                  #   (0x50505343 here == the old 6-bit-decode alias -> latch can't fire)
 iio_attr -c ad9361-phy altvoltage0 frequency      # RX LO tuned to your center freq
