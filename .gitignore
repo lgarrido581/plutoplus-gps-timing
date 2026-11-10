@@ -9,6 +9,7 @@ tools/*
 !tools/*.ps1
 !tools/make-uboot-env.py
 !tools/smoke_test.py
+!tools/flash_sd.py
 
 # Exported/generated LibreSDR Vivado workspace
 output/libresdr-hdl/

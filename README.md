@@ -23,6 +23,7 @@ overlay, Vivado 2022.2 build, and SD-card artifacts.
 [LibreSDR target](docs/LIBRESDR.md) ·
 [LibreSDR QSPI](docs/LIBRESDR_QSPI.md) ·
 [LibreSDR recovery](docs/LIBRESDR_RECOVERY.md) ·
+[Fishball7020 target](docs/FISHBALL.md) ·
 [Networked TDOA](docs/NETWORK.md) · [GPS scheduling](docs/SCHEDULING.md) · [PPS-aligned TDD](hdl/pps_counter/TDD_PPS_DESIGN.md) ·
 [ZMQ telemetry API](docs/PLUTO_ZMQ_API.md) · [ZMQ API ICD](docs/PLUTO_ZMQ_ICD.md) · [ZMQ capture-control ICD](docs/PLUTO_ZMQ_CTL_ICD.md) ·
 [Roadmap](docs/ROADMAP.md) · [Recovery](RECOVERY.md) · [Changelog](CHANGELOG.md)

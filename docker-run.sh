@@ -13,6 +13,7 @@ esac
 #   ./docker-run.sh                        # Pluto+ (backward-compatible default)
 #   ./docker-run.sh --target libresdr --prepare-hdl
 #   ./docker-run.sh --target libresdr --prebuilt-bit output/libresdr-hdl/system_top.bit
+#   ./docker-run.sh --target fishball --vivado /tools/Xilinx   # Fishball7020 -> output/fishball-sd/
 #   ./docker-run.sh --vivado /home/you/Xilinx   # mount your Vivado install (full build w/ boot.frm)
 #       pass the path you installed Vivado to; it is mounted at the SAME path inside the container.
 #
@@ -42,13 +43,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$TARGET" in
-    plutoplus|libresdr) ;;
-    *) echo "Invalid --target '$TARGET' (expected plutoplus or libresdr)"; exit 1 ;;
+    plutoplus|libresdr|fishball) ;;
+    *) echo "Invalid --target '$TARGET' (expected plutoplus, libresdr or fishball)"; exit 1 ;;
 esac
 
-[ "$TARGET" = "plutoplus" ] && [ "$PREPARE_HDL" = 1 ] \
+[ "$TARGET" != "libresdr" ] && [ "$PREPARE_HDL" = 1 ] \
     && { echo "--prepare-hdl is only valid for --target libresdr"; exit 1; }
+# Fishball7020: same flow as the Pluto+ with boards/<target>/. Its SD-card
+# BOOT.bin needs bootgen, so it always runs with the Linux Vivado mounted
+# (docs/FISHBALL.md).
+if [ "$TARGET" = "fishball" ]; then
+    [ -n "$VIVADO_HOST" ] || { echo "--target $TARGET needs --vivado <XilinxDir> (Vivado 2023.2 + bootgen)"; exit 1; }
+    [ -n "$PREBUILT_BIT_HOST" ] && { echo "--prebuilt-bit is not supported for --target $TARGET"; exit 1; }
+    case "$EXTRA_ENV" in *PPS_GPIO_TEST*) echo "--gpio-test is Pluto+-only"; exit 1 ;; esac
+fi
 [ "$TARGET" = "plutoplus" ] && EXTRA_ENV="$EXTRA_ENV -e BUILD_TARGET=plutoplus"
+[ "$TARGET" = "fishball" ] && EXTRA_ENV="$EXTRA_ENV -e BUILD_TARGET=fishball"
 [ "$TARGET" = "libresdr" ] && EXTRA_ENV="$EXTRA_ENV -e BUILD_TARGET=libresdr"
 [ "$PREPARE_HDL" = 1 ] && EXTRA_ENV="$EXTRA_ENV -e PREPARE_HDL=1"
 
