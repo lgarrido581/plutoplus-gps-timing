@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — Fishball7020 / PlutoSky R1 target
+
+- Added `--target fishball` for the Fishball7020 / PlutoSky R1 (XC7Z020 CLG400 +
+  AD9363 run as an AD9361, SD-card boot). Same flow as the Pluto+ with board files
+  in `boards/fishball/`; vendor inputs are pinned by sha256 in `vendor.lock`.
+- `BOOT.bin` is the stock FSBL and U-Boot cut from the vendor SD set around this
+  bitstream; the build checks that both come back byte for byte.
+- GPS PPS input on JP5 pin 7 (V10, 3.3 V) to the `pps_counter` latch and
+  `/dev/pps0`. **Not validated with a real 1PPS yet**: the firmware boots and
+  `/dev/pps0` registers, but until the checklist in `docs/FISHBALL.md` passes,
+  timing on this board is NTP-grade (chrony from the u-boot `ntp_server`).
+- Added `tools/flash_sd.py`: updates an SD-boot board's card over SSH with
+  backup and md5 checks; QSPI is never written.
+
 ## v2.2.0 — continuous GPS-timed stream, cyclic TX, gate and rate-change fixes
 
 Services only: the FPGA bitstream is the pinned known-good `working.bit` (fpga@1 sha256

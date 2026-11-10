@@ -11,6 +11,12 @@ REPO="https://github.com/sardylan/plutoplus"
 BRANCH="fw-0.39"
 SRC="/build/src"
 PPS_MIO=9
+# plutoplus (default) or fishball (Fishball7020 / PlutoSky R1, XC7Z020 CLG400): the
+# SD-boot board reuses this whole flow with its board files from boards/<board>/.
+BOARD="${BUILD_TARGET:-plutoplus}"
+case "$BOARD" in plutoplus|fishball) ;; *) echo "BUILD_TARGET=$BOARD not handled here"; exit 1 ;; esac
+# SD-boot boards: the PPS pin on their header is always wired to the pps_counter latch.
+[ "$BOARD" != "plutoplus" ] && PPS_HWLATCH=1
 
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; NC='\033[0m'
 info() { echo -e "${GREEN}[INFO]${NC} $*"; }
@@ -151,6 +157,17 @@ apply_patch "buildroot"   buildroot.diff
 apply_patch "u-boot-xlnx" u-boot-xlnx.diff
 (( HAVE_VIVADO )) && apply_patch "hdl" hdl.diff
 
+# ---- SD-boot board files (on top of the Pluto+ base) ----
+# HDL project, device tree and kernel config for the XC7Z020 boards; vendor inputs
+# are pinned in boards/<board>/vendor.lock and cached in the source volume.
+VENDOR_DIR="$SRC/$BOARD-vendor"
+if [ "$BOARD" != "plutoplus" ]; then
+    info "Applying $BOARD board files..."
+    rm -f /tmp/board_hdl_changed
+    bash "/build/boards-src/$BOARD/fetch_vendor.sh" "$VENDOR_DIR"
+    python3 "/build/boards-src/$BOARD/apply_board.py" "$(pwd)" "$VENDOR_DIR"
+fi
+
 # ---- GPS / PPS additions (on top of sardylan base) ----
 info "Applying GPS/PPS changes..."
 
@@ -254,8 +271,15 @@ if [ -n "$BR_CFG" ]; then
     # gpsd on the REAL uart: UART1 (MIO12/13) enumerates as /dev/ttyPS0 because
     # UART0 is disabled and UART1 owns the serial0 alias. Stock default is
     # /dev/ttyS1 (does not exist) so gpsd read nothing.
-    set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         'BR2_PACKAGE_GPSD=y'
-    set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD_DEVICES 'BR2_PACKAGE_GPSD_DEVICES="/dev/ttyPS0"'
+    # SD-boot boards: ttyPS0 (UART1, MIO8/9) is the FTDI debug console and there is no
+    # NMEA input yet, so no gpsd and the login getty stays (see below).
+    if [ "$BOARD" = "plutoplus" ]; then
+        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         'BR2_PACKAGE_GPSD=y'
+        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD_DEVICES 'BR2_PACKAGE_GPSD_DEVICES="/dev/ttyPS0"'
+    else
+        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         '# BR2_PACKAGE_GPSD is not set'
+        sed -i '/^BR2_PACKAGE_GPSD_DEVICES=/d' "$BR_CFG"
+    fi
     # chrony for GPS-disciplined time.
     set_kcfg "$BR_CFG" BR2_PACKAGE_CHRONY       'BR2_PACKAGE_CHRONY=y'
     # pps-tools provides <sys/timepps.h> so chrony/gpsd COMPILE the PPS refclock
@@ -267,7 +291,11 @@ if [ -n "$BR_CFG" ]; then
     set_kcfg "$BR_CFG" BR2_PACKAGE_NCURSES      'BR2_PACKAGE_NCURSES=y'
     # Free UART1 for GPS: drop the login getty buildroot puts on ttyPS0 (it
     # competes with gpsd for the NMEA bytes). USB console (ttyGS0) is unaffected.
-    set_kcfg "$BR_CFG" BR2_TARGET_GENERIC_GETTY_PORT 'BR2_TARGET_GENERIC_GETTY_PORT=""'
+    if [ "$BOARD" = "plutoplus" ]; then
+        set_kcfg "$BR_CFG" BR2_TARGET_GENERIC_GETTY_PORT 'BR2_TARGET_GENERIC_GETTY_PORT=""'
+    else
+        set_kcfg "$BR_CFG" BR2_TARGET_GENERIC_GETTY_PORT 'BR2_TARGET_GENERIC_GETTY_PORT="ttyPS0"'
+    fi
     # Dedicated rootfs overlay for chrony.conf (stock sets BR2_ROOTFS_OVERLAY=""
     # so files dropped elsewhere never reach the image).
     set_kcfg "$BR_CFG" BR2_ROOTFS_OVERLAY       'BR2_ROOTFS_OVERLAY="board/pluto/gps-overlay"'
@@ -276,7 +304,11 @@ if [ -n "$BR_CFG" ]; then
     set_kcfg "$BR_CFG" BR2_ROOTFS_POST_BUILD_SCRIPT \
         'BR2_ROOTFS_POST_BUILD_SCRIPT="board/pluto/post-build.sh board/pluto/gps-post-build.sh"'
 
-    info "  buildroot: gpsd->/dev/ttyPS0, chrony+pps-tools, getty removed, overlay set"
+    if [ "$BOARD" = "plutoplus" ]; then
+        info "  buildroot: gpsd->/dev/ttyPS0, chrony+pps-tools, getty removed, overlay set"
+    else
+        info "  buildroot: chrony+pps-tools, no gpsd, ttyPS0 console kept, overlay set"
+    fi
 fi
 
 # ZMQ telemetry API (pluto-zmqd): read-only timing/gps/rf/dma over ZMQ (PUB :5560 +
@@ -411,10 +443,22 @@ fi
 # chrony.conf: GPS coarse time via gpsd shared memory + precise PPS via /dev/pps0.
 GPS_OVL="buildroot/board/pluto/gps-overlay"
 mkdir -p "$GPS_OVL/etc" "$GPS_OVL/var/lib/chrony"
-cat > "$GPS_OVL/etc/chrony.conf" << 'EOF'
-# GPS NMEA gives coarse time (via gpsd SHM 0); PPS gives precision.
+if [ "$BOARD" = "plutoplus" ]; then
+    CHRONY_SOURCES='# GPS NMEA gives coarse time (via gpsd SHM 0); PPS gives precision.
 refclock SHM 0 refid GPS precision 1e-1 offset 0.0 delay 0.2 noselect
-refclock PPS /dev/pps0 refid PPS lock GPS prefer
+refclock PPS /dev/pps0 refid PPS lock GPS prefer'
+else
+    # No NMEA on the SD-boot boards: coarse time comes from LAN NTP servers named in
+    # the u-boot env (fw_setenv ntp_server "<ip> [<ip>...]"; S48ntpsources writes them
+    # into the sourcedir). Without "lock", the PPS refclock numbers its pulses from
+    # that NTP time, so wiring PPS to the header later tightens it with no change.
+    CHRONY_SOURCES='# Coarse time: NTP servers from the u-boot env (see /etc/init.d/S48ntpsources).
+sourcedir /var/run/chrony-sources
+# Precise time: GPS 1PPS on the board header (/dev/pps0), numbered from the NTP time.
+refclock PPS /dev/pps0 refid PPS prefer'
+fi
+cat > "$GPS_OVL/etc/chrony.conf" << EOF
+$CHRONY_SOURCES
 makestep 1 3
 rtcsync
 driftfile /var/lib/chrony/drift
@@ -436,7 +480,10 @@ info "  rootfs overlay: $GPS_OVL/etc/chrony.conf written"
 # (-> garbage), and without -n gpsd won't poll continuously to feed chrony SHM.
 # Ours: force 9600, then gpsd -n (continuous poll) -b (readonly; safe sharing the
 # port with the kernel console). Overlay overwrites the package-installed copy.
+# The SD-boot boards have no gpsd and keeps its console, so it gets neither this nor
+# S30bootdelay below; it gets S48ntpsources instead.
 mkdir -p "$GPS_OVL/etc/init.d"
+if [ "$BOARD" = "plutoplus" ]; then
 cat > "$GPS_OVL/etc/init.d/S50gpsd" << 'EOF'
 #!/bin/sh
 NAME=gpsd
@@ -490,6 +537,34 @@ exit 0
 EOF
 chmod +x "$GPS_OVL/etc/init.d/S30bootdelay"
 info "  rootfs overlay: S30bootdelay (sets u-boot bootdelay=-2) written"
+else
+rm -f "$GPS_OVL/etc/init.d/S50gpsd" "$GPS_OVL/etc/init.d/S30bootdelay"
+# NTP sources from the u-boot env, written before chrony starts (S49chrony).
+# Site addresses live in the env, not in this public repo:
+#   fw_setenv ntp_server "192.168.x.y [192.168.x.z ...]"
+cat > "$GPS_OVL/etc/init.d/S48ntpsources" << 'EOF'
+#!/bin/sh
+DIR=/var/run/chrony-sources
+case "$1" in
+	start|restart|reload)
+		mkdir -p $DIR
+		: > $DIR/env.sources
+		for s in $(fw_printenv -n ntp_server 2>/dev/null | tr ',' ' '); do
+			echo "server $s iburst" >> $DIR/env.sources
+		done
+		if [ -s $DIR/env.sources ]; then
+			echo "NTP sources: $(tr '\n' ' ' < $DIR/env.sources)"
+		else
+			echo "NTP sources: none (fw_setenv ntp_server <ip> to add)"
+		fi
+		[ "$1" = start ] || chronyc reload sources >/dev/null 2>&1
+		;;
+esac
+exit 0
+EOF
+chmod +x "$GPS_OVL/etc/init.d/S48ntpsources"
+info "  rootfs overlay: S48ntpsources (chrony NTP servers from u-boot env ntp_server)"
+fi
 
 # xo_correction GPS-discipline daemon. Only meaningful on the --hwlatch bitstream
 # (the hardware PPS latch must see edges), so ship it only there. Ships the loop
@@ -547,24 +622,25 @@ fi
 
 # Post-build script: delete buildroot's generic serial getty from inittab so the
 # GPS UART (ttyPS0) has no login console competing with gpsd. Runs AFTER the
-# getty finalize hook. USB console (ttyGS0) is left intact.
+# getty finalize hook. USB console (ttyGS0) is left intact. (SD-boot boards: ttyPS0 is
+# the debug console, so its getty stays.)
 FW_VER="${GPS_TIMING_VERSION:-unknown}"
 cat > buildroot/board/pluto/gps-post-build.sh << 'EOF'
 #!/bin/sh
 INITTAB="$1/etc/inittab"
-[ -f "$INITTAB" ] && sed -i '/# GENERIC_SERIAL$/d' "$INITTAB"
+[ "@@BOARD@@" = "plutoplus" ] && [ -f "$INITTAB" ] && sed -i '/# GENERIC_SERIAL$/d' "$INITTAB"
 # Login banner (/etc/motd): the stock template carries a "#BUILD#" placeholder that
 # S45msd rewrites to the sardylan base version (e.g. "v0.39") at boot. Replace the
 # placeholder now with this repo's firmware version (so S45msd's sed becomes a no-op)
 # and re-point the URL, keeping the stock Pluto+ art above.
 MOTD="$1/etc/motd"
 if [ -f "$MOTD" ]; then
-    sed -i "s|^#BUILD#$|GPS-timing firmware v@@FWVER@@ (plutoplus)|" "$MOTD"
+    sed -i "s|^#BUILD#$|GPS-timing firmware v@@FWVER@@ (@@BOARD@@)|" "$MOTD"
     sed -i "s|^https://github.com/sardylan/plutoplus$|https://github.com/lgarrido581/plutoplus-gps-timing|" "$MOTD"
 fi
 exit 0
 EOF
-sed -i "s|@@FWVER@@|$FW_VER|g" buildroot/board/pluto/gps-post-build.sh
+sed -i "s|@@FWVER@@|$FW_VER|g; s|@@BOARD@@|$BOARD|g" buildroot/board/pluto/gps-post-build.sh
 chmod +x buildroot/board/pluto/gps-post-build.sh
 info "  post-build: gps-post-build.sh created (getty removal + motd v$FW_VER banner)"
 
@@ -642,22 +718,25 @@ if (( HAVE_VIVADO )) && [ -d hdl/projects/pluto ] && [ -f /build/hdl-src/pps_cou
     info "Integrating pps_counter into the Pluto block design (HW-latch=$PPS_HWLATCH, gpio-test=$PPS_GPIO_TEST)..."
     rm -f /tmp/pps_changed
     HDL_CHANGED=0
+    [ -f /tmp/board_hdl_changed ] && HDL_CHANGED=1
     if ! cmp -s /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v 2>/dev/null; then
         cp /build/hdl-src/pps_counter/pps_counter.v hdl/projects/pluto/pps_counter.v
         HDL_CHANGED=1
         info "  pps_counter.v -> hdl/projects/pluto/"
     fi
-    PPS_HWLATCH="$PPS_HWLATCH" PPS_GPIO_TEST="$PPS_GPIO_TEST" python3 - << 'PYEOF'
+    BOARD="$BOARD" PPS_HWLATCH="$PPS_HWLATCH" PPS_GPIO_TEST="$PPS_GPIO_TEST" python3 - << 'PYEOF'
 import os
 pdir = "hdl/projects/pluto"
+board    = os.environ.get("BOARD", "plutoplus")
 hwlatch  = os.environ.get("PPS_HWLATCH", "0") == "1"
 gpiotest = os.environ.get("PPS_GPIO_TEST", "0") == "1"
 changed = False
 
 # system_top.v: normalize the extra top-level port to match the mode (strip any
-# prior pps_ext/pps_gpio addition, then add the one this mode needs).
+# prior pps_ext/pps_gpio addition, then add the one this mode needs). The SD-boot
+# board tops (boards/<board>/hdl) declare pps_ext themselves, so they are left alone.
 stv = pdir + "/system_top.v"
-s = open(stv).read()
+s = open(stv).read() if board == "plutoplus" else ""
 s2 = s
 s2 = s2.replace(",\n  input           pps_ext\n);", "\n);")
 s2 = s2.replace(",\n  output [1:0]    pps_gpio\n);", "\n);")
@@ -761,7 +840,13 @@ cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/in
        # LATCH_COUNT/LATCH_SEQ 2-FF CDC (cnt_clk -> s_axi), changes <=1/frame like pps_count
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lc_s1_reg*}]\n"
        "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lseq_s1_reg*}]\n")
-if hwlatch:
+if board == "fishball":
+    pin = ("# PPS input V10 = IO_L21N_T3_DQS_13 = JP5 pin 7 (3V3_IO1), bank 13 = 3.3V,\n"
+           "# PULLDOWN. A 3.3V GPS PPS connects directly; ground is JP5 pin 2 or 20.\n"
+           "set_property PACKAGE_PIN V10 [get_ports pps_ext]\n"
+           "set_property IOSTANDARD LVCMOS33 [get_ports pps_ext]\n"
+           "set_property PULLDOWN TRUE [get_ports pps_ext]\n")
+elif hwlatch:
     pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
            "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"
            "set_property PACKAGE_PIN F20 [get_ports pps_ext]\n"
@@ -876,11 +961,25 @@ BUILD_EXIT=${PIPESTATUS[0]}
 # test build is named pluto-gpiotest.frm so it never clobbers the counter firmware.
 FRM_OUT="pluto.frm"; DFU_OUT="pluto.dfu"
 if [ "${PPS_GPIO_TEST:-0}" = "1" ]; then FRM_OUT="pluto-gpiotest.frm"; DFU_OUT="pluto-gpiotest.dfu"; fi
+# SD-boot board artifacts get their own names so they never overwrite the Pluto+ ones in ./output.
+[ "$BOARD" != "plutoplus" ] && { FRM_OUT="$BOARD.frm"; DFU_OUT="$BOARD.dfu"; }
 cp build/pluto.frm     "/build/output/$FRM_OUT" 2>/dev/null && info "  $FRM_OUT -> /build/output/" || true
 cp build/pluto.dfu     "/build/output/$DFU_OUT" 2>/dev/null && info "  $DFU_OUT -> /build/output/" || true
-cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /build/output/" || true
+[ "$BOARD" = "plutoplus" ] && { cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /build/output/" || true; }
 
 [ $BUILD_EXIT -ne 0 ] && die "Build failed with exit code $BUILD_EXIT" || true
+
+# SD-boot boards: SD-card boot set (they boot from SD only; nothing touches QSPI), plus
+# the bitstream on its own for JTAG loading. docker-run.sh requires --vivado for these
+# targets (bootgen); the cached XSA means a services-only change does not re-synthesize.
+if [ "$BOARD" != "plutoplus" ]; then
+    info "Assembling the $BOARD SD-card set..."
+    command -v bootgen >/dev/null || die "bootgen not found ($BOARD SD set needs --vivado)"
+    bash "/build/boards-src/$BOARD/make_sd.sh" "$(pwd)" "$VENDOR_DIR" "/build/output/$BOARD-sd" \
+        || die "$BOARD SD assembly failed"
+    mkdir -p "/build/output/$BOARD"
+    cp build/system_top.bit "/build/output/$BOARD/system_top.bit"
+fi
 
 # Fail-hard anti-brick gate: a build must NEVER "succeed" with a truncated FPGA
 # bitstream (the v1.5 / v2.0.1 brick). Re-measure the produced FIT with the SAME
@@ -893,7 +992,7 @@ cp build/uboot-env.dfu /build/output/ 2>/dev/null && info "  uboot-env.dfu -> /b
 # bit never changes it, so it must match the pin. A --vivado synth legitimately produces a new
 # bit (no PREBUILT_BIT, so not enforced); --gpio-test reuses its own distinct bit, so skip it.
 PIN_FILE="/build/boards-src/plutoplus/fpga.sha256pin"
-if [ -n "${PREBUILT_BIT:-}" ] && [ "${PPS_GPIO_TEST:-0}" != "1" ] && [ -f "$PIN_FILE" ]; then
+if [ "$BOARD" = "plutoplus" ] && [ -n "${PREBUILT_BIT:-}" ] && [ "${PPS_GPIO_TEST:-0}" != "1" ] && [ -f "$PIN_FILE" ]; then
     EXPECTED_FPGA_SHA256="$(grep -oE '^[0-9a-f]{64}$' "$PIN_FILE" | head -1)"; export EXPECTED_FPGA_SHA256
     info "  fpga pin: enforcing known-good bitstream $EXPECTED_FPGA_SHA256"
 fi

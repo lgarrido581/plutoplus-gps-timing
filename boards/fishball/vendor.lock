@@ -1,0 +1,15 @@
+# Vendor inputs for --target fishball, fetched by boards/fishball/fetch_vendor.sh.
+# A changed upstream file fails the build until this lock is updated on purpose.
+#
+#   fishwan  the vendor's plutosdr-fw fork for this board; 95aad369 is the commit
+#            the factory firmware reports (v0.38-4-g95aad). Pins + device tree.
+#   sdlab    OpenSourceSDRLab's stock SD-card set (Apache-2.0). Its BOOT.bin
+#            supplies the FSBL and U-Boot that already boot this board.
+repo fishwan Xiaozhang-code-cloud/Fish-Wan-plutosdr-fw-7020-SDR 95aad369f0f3f4ae852bea94d980cc2db90728a2
+repo sdlab   OpenSourceSDRLab/PlutoSky_7020_AD936X_SDR             f09b7353a0578dda2c4b6b2d17e6b4b7d884bb38
+# sha256                                                            repo:path
+c59be3ad3f4d7c2914b37eb08facf72f6d1d183305e8c8b1fb2ec7fae94c2d2d  fishwan:hdl/projects/pluto/system_constr.xdc
+ecd3bbae78509154cb6dbc0b986afd0439d3a188c57155a3e2748615194e6a49  fishwan:linux/arch/arm/boot/dts/zynq-pluto-sdr.dtsi
+bf8fb1c34b3a1b97173f519276f380d24304037066851a19809f0c2584ccc57a  fishwan:linux/arch/arm/boot/dts/zynq-pluto-sdr-revc.dts
+15eb0a49dbfe428264c033e53b540f7fc5ed3214bfa6db96dda168ac30828745  sdlab:firmware/SD Card Firmware/BOOT.bin
+07d83b2719af18d002648b065c37980ddd8ce16359c6f990f9b665b9bec3429d  sdlab:firmware/SD Card Firmware/uEnv.txt
