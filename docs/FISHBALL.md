@@ -25,7 +25,8 @@ default Pluto+ target.
 | Console | UART1 MIO12/13 (given to GPS NMEA) | UART1 MIO8/9 = FTDI channel B, kept as the login console |
 | SD card | card detect on MIO47 | no card detect |
 | PPS input | F20 (1.8 V) + MIO9 | JP5 pin 7 (`3V3_IO1`, V10, 3.3 V), to the `pps_counter` latch and EMIO gpio 71 (`/dev/pps0`); not yet validated with a real PPS (see Time) |
-| Coarse time | GPS NMEA via gpsd | LAN NTP servers from the u-boot env (no gpsd) |
+| GPS NMEA | PS UART1 via `gpsd` | JP5 pin 9 → PL UARTLite → `/dev/ttyUL0` via `gpsd` |
+| Coarse time | GPS NMEA via gpsd | GPS NMEA via gpsd; `ntp_server` supplies bootstrap and holdover NTP |
 | Boot | QSPI (`pluto.frm`) | SD card (`output/fishball-sd/`) |
 
 ## Vendor inputs
@@ -105,10 +106,23 @@ reset
 
 ## Time
 
-`chronyd` takes its servers from `ntp_server` (space- or comma-separated) through
-`/etc/init.d/S48ntpsources`, which writes `/var/run/chrony-sources/env.sources`
-before chrony starts. A GPS-locked Pluto+ running this firmware is a stratum-1
-server and makes a good `ntp_server`. To change servers without rebooting:
+The Fishball target has a dedicated 9,600 baud GPS UARTLite. It keeps the FTDI
+console usable and gives `gpsd` the NMEA stream at `/dev/ttyUL0`. Connect a
+3.3 V GPS module as follows; do not connect a 5 V UART directly.
+
+| GPS pin | Fishball JP5 pin | Signal |
+|---|---:|---|
+| PPS | 7 | `3V3_IO1` / V10 → FPGA latch and `/dev/pps0` |
+| TX (NMEA out) | 9 | `3V3_IO2` / U9 → `/dev/ttyUL0` RX |
+| RX (optional configuration in) | 11 | `3V3_IO3` / U10 ← `/dev/ttyUL0` TX |
+| GND | 2 or 20 | Shared ground |
+| 3.3 V supply | 3 | Verify the GPS module's current requirement before using this rail |
+
+`chronyd` reads coarse time from gpsd's SHM source and locks `/dev/pps0` to it
+for precision. It also reads optional bootstrap and holdover servers from
+`ntp_server` (space- or comma-separated) through `/etc/init.d/S48ntpsources`.
+A GPS-locked Pluto+ running this firmware is a suitable `ntp_server`. To change
+servers without rebooting:
 
 ```sh
 fw_setenv ntp_server "192.168.x.z"
@@ -121,13 +135,29 @@ chronyc sources
 > registers at boot, but no 1PPS has been fed to JP5 pin 7 so far. Until the
 > checklist items below pass, treat cross-node timing on this board as NTP-grade.
 
-The PPS refclock has no `lock` source: once a 3.3 V
-1PPS reaches JP5 pin 7 (ground on pin 2 or 20) it numbers its pulses from the
-NTP time and becomes the preferred source. JP5 pins 1, 3 and 5 are power rails
-and pin 15 is the 40 MHz oscillator's tune input; do not drive them. GPS NMEA
-is not wired yet.
+When gpsd has a valid fix, chrony locks the PPS refclock to the GPS NMEA source
+and makes it preferred. JP5 pins 1, 3 and 5 are power rails and pin 15 is the
+40 MHz oscillator's tune input; do not drive pin 15.
 
 ## Bring-up checklist
+
+### Timing requirements
+
+The Fishball build fails if routed timing is not met; a cached historical
+`TIMING_ALLOW` warning override is restored to the fatal ADI timing gate.
+`hdl/pps_counter/pps_counter_cdc.xdc` bounds stage-one CDC routing to 4 ns
+(the minimum constrained clock period), including bus skew. Stage-two and
+downstream paths remain normally timed. Synchronizer FFs have `ASYNC_REG`
+and shift-register extraction disabled. Counter reset asserts asynchronously
+but releases through two RX-clocked stages; only those stages' asynchronous
+reset pins are excepted, not the counter reset fanout.
+
+Run `bash hdl/pps_counter/test_reset_sim.sh` with Vivado simulation tools on PATH
+to check reset assertion, RX-clock-aligned release, and PPS edge counting.
+Configuration buses retain the documented disable/write/enable contract;
+timing exceptions do not replace that software sequencing requirement.
+
+See AMD's [individual CDC constraints guidance](https://docs.amd.com/r/en-US/ug949-vivado-design-methodology/Constraints-on-Individual-CDC-Paths).
 
 - [ ] Boots to the login prompt on the FTDI console; banner says `(fishball)`.
 - [ ] `eth0` links at 1000 Mb/s and answers on its configured address.
@@ -137,7 +167,10 @@ is not wired yet.
       with no DMA overflow. Mind the PAs: never transmit into an open port.
 - [ ] `devmem 0x7C460000` reads `0x50505343` (`pps_counter` ID); LIVE_COUNT
       (`0x7C46000C`) advances between reads.
-- [ ] `chronyc sources` shows the `ntp_server` entries reachable and selected.
+- [ ] `ls -l /dev/ttyUL0 /dev/pps0` shows the GPS UART and PPS devices.
+- [ ] `gpsmon` shows a valid GPS fix and NMEA time from `/dev/ttyUL0`.
+- [ ] `chronyc sources` shows GPS/PPS selected after a fix; `ntp_server` is an
+      available bootstrap and holdover source.
 - [ ] With a PPS on JP5 pin 7: `ppstest /dev/pps0` sees it, STATUS bit 0
       (`0x7C460008`) is set and PPS_SEQ (`0x7C460018`) counts once a second.
 - [ ] `pluto_ctld` / `pluto_zmqd` answer on :5562 / :5560.

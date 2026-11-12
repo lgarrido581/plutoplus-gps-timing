@@ -10,8 +10,8 @@ Usage: apply_board.py <plutosdr-fw root> <vendor dir from fetch_vendor.sh>
   MIO, LVDS AD9361, 1 GiB, SD card, 16 MiB QSPI) and patches them to match the
   factory devicetree.dtb: no clock hogs or button (the factory tree has neither),
   200 ppm refclk accuracy (it sets the xo_correction range), 2R2T. Adds the
-  pps-gpio client and probes the transmitter at full attenuation (the board has
-  a PA on each TX port).
+  pps-gpio client, a PL UARTLite for GPS NMEA, and probes the transmitter at
+  full attenuation (the board has a PA on each TX port).
 
 Fails on a missing anchor rather than producing a half-patched tree.
 """
@@ -22,7 +22,7 @@ ROOT = Path(sys.argv[1]).resolve()
 VENDOR = Path(sys.argv[2]).resolve() / "fishwan"
 BOARD = Path(__file__).resolve().parent
 
-PPS_MARKERS = (
+GPS_MARKERS = (
     "# ---- GPS timing counter (added by docker-build-inner.sh) ----",
     "# ---- pps_counter CDC (added by docker-build-inner.sh) ----",
 )
@@ -35,7 +35,7 @@ XDC_HEADER = (
 
 
 def base_of(text: str) -> str:
-    for marker in PPS_MARKERS:
+    for marker in GPS_MARKERS:
         i = text.find(marker)
         if i >= 0:
             text = text[:i]
@@ -96,11 +96,27 @@ def devicetree() -> None:
     text = cut(text, "\tone-bit-adc-dac@0 {", "\n\t};\n", path)
     text = replace(text, '\tmodel = "Analog Devices PlutoSDR Rev.C (Z7010/AD9363)";\n',
                    '\tmodel = "Analog Devices PlutoSDR Rev.C (Z7020/AD9361)";\n\n'
-                   "\taliases {\n\t\tmmc0 = &sdhci0;\n\t};\n", path)
+                   "\taliases {\n"
+                   "\t\tmmc0 = &sdhci0;\n"
+                   "\t\tserial1 = &gps_uart;\n"
+                   "\t};\n", path)
     text = text.rstrip("\n") + (
         "\n\n&adc0_ad9364 {\n"
         "\t/* Probe with the transmitter muted: each TX port has a PA. */\n"
         "\tadi,tx-attenuation-mdB = <89750>;\n"
+        "};\n"
+        "\n"
+        "&fpga_axi {\n"
+        "\tgps_uart: serial@42c00000 {\n"
+        "\t\tcompatible = \"xlnx,axi-uartlite-2.0\", \"xlnx,xps-uartlite-1.00.a\";\n"
+        "\t\treg = <0x42c00000 0x1000>;\n"
+        "\t\tinterrupt-parent = <&intc>;\n"
+        "\t\tinterrupts = <0 58 4>;\n"
+        "\t\tclock-frequency = <100000000>;\n"
+        "\t\tcurrent-speed = <9600>;\n"
+        "\t\tport-number = <0>;\n"
+        "\t\tstatus = \"okay\";\n"
+        "\t};\n"
         "};\n"
         "\n/ {\n"
         "\t/* GPS 1PPS on JP5 pin 7 (3V3_IO1, V10) -> EMIO gpio_i[17]. */\n"
@@ -110,7 +126,7 @@ def devicetree() -> None:
         "\t};\n"
         "};\n")
     (dts_dir / path).write_text(text)
-    print(f"  linux dts: vendor dtsi + {path} (factory deltas, pps-gpio on gpio {PPS_GPIO})")
+    print(f"  linux dts: vendor dtsi + {path} (GPS UART /dev/ttyUL0, pps-gpio on gpio {PPS_GPIO})")
 
 
 hdl()
