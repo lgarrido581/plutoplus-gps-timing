@@ -38,6 +38,9 @@
 //   - pps_ext: GPS 1PPS on JP5 pin 7 (3V3_IO1, V10, bank 13 = 3.3 V). Feeds the
 //     pps_counter hardware latch in the block design AND EMIO gpio_i[17]
 //     (Linux gpio 71) for the kernel pps-gpio client (/dev/pps0).
+//   - gps_uart_rx / gps_uart_tx: 3.3 V NMEA UART on JP5 pins 9 / 11
+//     (U9 / U10). This is a dedicated PL AXI UARTLite, so the FTDI console on
+//     PS UART1 remains available while gpsd owns /dev/ttyUL0.
 //   - tdd_ext_sync / txdata_o: the Pluto+ block design keeps axi_tdd; its external
 //     sync is re-driven by pps_counter/pps_tick, so the top ties it off.
 
@@ -101,7 +104,9 @@ module system_top (
   output          pl_spi_mosi,
   input           pl_spi_miso,
 
-  input           pps_ext);
+  input           pps_ext,
+  input           gps_uart_rx,
+  output          gps_uart_tx);
 
   // internal signals
 
@@ -153,6 +158,8 @@ module system_top (
     .gpio_t (gpio_t),
     .iic_main_scl_io (iic_scl),
     .iic_main_sda_io (iic_sda),
+    .gps_uart_rx (gps_uart_rx),
+    .gps_uart_tx (gps_uart_tx),
     .pps_ext (pps_ext),
     .rx_clk_in_p (rx_clk_in_p),
     .rx_clk_in_n (rx_clk_in_n),

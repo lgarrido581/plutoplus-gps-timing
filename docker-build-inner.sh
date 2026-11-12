@@ -179,14 +179,23 @@ sed -i '/^CONFIG_DEBUG_LL=y$/d'         "$DEFCONFIG"
 sed -i '/^CONFIG_DEBUG_ZYNQ_UART1=y$/d' "$DEFCONFIG"
 sed -i '/^CONFIG_EARLY_PRINTK=y$/d'     "$DEFCONFIG"
 
-# Add PPS subsystem + GPIO PPS client (if not already present)
+# Add PPS subsystem + GPIO PPS client (if not already present). The Fishball
+# target also needs the AXI UARTLite driver for the dedicated GPS NMEA port.
 grep -q "CONFIG_PPS=y" "$DEFCONFIG" || cat >> "$DEFCONFIG" << 'EOF'
 
 # GPS PPS timing
 CONFIG_PPS=y
 CONFIG_PPS_CLIENT_GPIO=y
 EOF
-info "  defconfig: UART1 debug removed, PPS enabled"
+if [ "$BOARD" = "fishball" ] && ! grep -q '^CONFIG_SERIAL_UARTLITE=y$' "$DEFCONFIG"; then
+cat >> "$DEFCONFIG" << 'EOF'
+
+# GPS NMEA UARTLite on JP5 pins 9/11
+CONFIG_SERIAL_UARTLITE=y
+CONFIG_SERIAL_UARTLITE_NR_UARTS=1
+EOF
+fi
+info "  defconfig: PPS enabled; Fishball keeps UART1 console and enables UARTLite GPS when selected"
 
 # Add pps-gpio DTS node to RevC DTS (sardylan's linux.diff modifies this file
 # but only adds Ethernet/USB — no conflict with our appended node)
@@ -206,8 +215,9 @@ EOF
     info "  DTS: pps-gpio node on MIO${PPS_MIO}"
 fi
 
-# U-boot: remove console=ttyPS1 so UART1 is free for GPS NMEA
-# (sardylan's u-boot-xlnx.diff does not touch UART settings)
+# U-boot: only the Pluto+ gives UART1 to GPS. Fishball keeps its MIO8/9 FTDI
+# console and places GPS NMEA on the dedicated PL UARTLite.
+if [ "$BOARD" = "plutoplus" ]; then
 for f in \
     u-boot-xlnx/include/configs/zynq-common.h \
     u-boot-xlnx/configs/zynq_pluto_defconfig; do
@@ -215,6 +225,7 @@ for f in \
         && sed -i 's/console=ttyPS1,[^ "]*//g' "$f" \
         && info "  u-boot: removed console=ttyPS1 from $(basename $f)"
 done
+fi
 
 # Buildroot: use sardylan's BR2_TOOLCHAIN_EXTERNAL_LINARO_ARM=y as-is.
 # DO NOT switch to CUSTOM — Buildroot's LINARO_ARM downloads and installs its
@@ -271,14 +282,14 @@ if [ -n "$BR_CFG" ]; then
     # gpsd on the REAL uart: UART1 (MIO12/13) enumerates as /dev/ttyPS0 because
     # UART0 is disabled and UART1 owns the serial0 alias. Stock default is
     # /dev/ttyS1 (does not exist) so gpsd read nothing.
-    # SD-boot boards: ttyPS0 (UART1, MIO8/9) is the FTDI debug console and there is no
-    # NMEA input yet, so no gpsd and the login getty stays (see below).
+    # Pluto+ uses PS UART1 for NMEA. Fishball retains PS UART1 for its FTDI
+    # console and receives NMEA on the 9600-baud PL UARTLite at /dev/ttyUL0.
     if [ "$BOARD" = "plutoplus" ]; then
         set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         'BR2_PACKAGE_GPSD=y'
         set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD_DEVICES 'BR2_PACKAGE_GPSD_DEVICES="/dev/ttyPS0"'
     else
-        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         '# BR2_PACKAGE_GPSD is not set'
-        sed -i '/^BR2_PACKAGE_GPSD_DEVICES=/d' "$BR_CFG"
+        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD         'BR2_PACKAGE_GPSD=y'
+        set_kcfg "$BR_CFG" BR2_PACKAGE_GPSD_DEVICES 'BR2_PACKAGE_GPSD_DEVICES="/dev/ttyUL0"'
     fi
     # chrony for GPS-disciplined time.
     set_kcfg "$BR_CFG" BR2_PACKAGE_CHRONY       'BR2_PACKAGE_CHRONY=y'
@@ -307,7 +318,7 @@ if [ -n "$BR_CFG" ]; then
     if [ "$BOARD" = "plutoplus" ]; then
         info "  buildroot: gpsd->/dev/ttyPS0, chrony+pps-tools, getty removed, overlay set"
     else
-        info "  buildroot: chrony+pps-tools, no gpsd, ttyPS0 console kept, overlay set"
+        info "  buildroot: gpsd->/dev/ttyUL0, chrony+pps-tools, ttyPS0 console kept, overlay set"
     fi
 fi
 
@@ -448,14 +459,14 @@ if [ "$BOARD" = "plutoplus" ]; then
 refclock SHM 0 refid GPS precision 1e-1 offset 0.0 delay 0.2 noselect
 refclock PPS /dev/pps0 refid PPS lock GPS prefer'
 else
-    # No NMEA on the SD-boot boards: coarse time comes from LAN NTP servers named in
-    # the u-boot env (fw_setenv ntp_server "<ip> [<ip>...]"; S48ntpsources writes them
-    # into the sourcedir). Without "lock", the PPS refclock numbers its pulses from
-    # that NTP time, so wiring PPS to the header later tightens it with no change.
-    CHRONY_SOURCES='# Coarse time: NTP servers from the u-boot env (see /etc/init.d/S48ntpsources).
+    # Fishball takes NMEA from the PL UARTLite. Keep configured LAN NTP servers
+    # as a bootstrap and holdover source, then lock PPS to GPS SHM once gpsd has
+    # a valid time solution.
+    CHRONY_SOURCES='# GPS NMEA via gpsd SHM is coarse time; PPS is precision.
 sourcedir /var/run/chrony-sources
-# Precise time: GPS 1PPS on the board header (/dev/pps0), numbered from the NTP time.
-refclock PPS /dev/pps0 refid PPS prefer'
+refclock SHM 0 refid GPS precision 1e-1 offset 0.0 delay 0.2 noselect
+# GPS 1PPS on JP5 pin 7, locked to the NMEA source after a valid GPS fix.
+refclock PPS /dev/pps0 refid PPS lock GPS prefer'
 fi
 cat > "$GPS_OVL/etc/chrony.conf" << EOF
 $CHRONY_SOURCES
@@ -480,8 +491,7 @@ info "  rootfs overlay: $GPS_OVL/etc/chrony.conf written"
 # (-> garbage), and without -n gpsd won't poll continuously to feed chrony SHM.
 # Ours: force 9600, then gpsd -n (continuous poll) -b (readonly; safe sharing the
 # port with the kernel console). Overlay overwrites the package-installed copy.
-# The SD-boot boards have no gpsd and keeps its console, so it gets neither this nor
-# S30bootdelay below; it gets S48ntpsources instead.
+# Fishball keeps its FTDI console and gets a separate gpsd service for /dev/ttyUL0.
 mkdir -p "$GPS_OVL/etc/init.d"
 if [ "$BOARD" = "plutoplus" ]; then
 cat > "$GPS_OVL/etc/init.d/S50gpsd" << 'EOF'
@@ -538,7 +548,38 @@ EOF
 chmod +x "$GPS_OVL/etc/init.d/S30bootdelay"
 info "  rootfs overlay: S30bootdelay (sets u-boot bootdelay=-2) written"
 else
-rm -f "$GPS_OVL/etc/init.d/S50gpsd" "$GPS_OVL/etc/init.d/S30bootdelay"
+rm -f "$GPS_OVL/etc/init.d/S30bootdelay"
+# UARTLite's baud is fixed in the bitstream at 9600. gpsd must poll
+# continuously to provide chrony's SHM source and must not reconfigure it.
+cat > "$GPS_OVL/etc/init.d/S50gpsd" << 'EOF'
+#!/bin/sh
+NAME=gpsd
+DAEMON=/usr/sbin/$NAME
+DEVICES="/dev/ttyUL0"
+PIDFILE=/var/run/$NAME.pid
+start() {
+	printf "Starting $NAME: "
+	# Keep gpsd in the foreground of the supervised child so the generated
+	# PID file names the long-running daemon rather than an exited parent.
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -N -n -b $DEVICES
+	echo "OK"
+}
+stop() {
+	printf "Stopping $NAME: "
+	start-stop-daemon -K -q -p "$PIDFILE"
+	rm -f "$PIDFILE"
+	echo "OK"
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit $?
+EOF
+chmod +x "$GPS_OVL/etc/init.d/S50gpsd"
+info "  rootfs overlay: custom S50gpsd (PL UARTLite /dev/ttyUL0 at 9600) written"
 # NTP sources from the u-boot env, written before chrony starts (S49chrony).
 # Site addresses live in the env, not in this public repo:
 #   fw_setenv ntp_server "192.168.x.y [192.168.x.z ...]"
@@ -824,28 +865,22 @@ regen(pdir + "/system_bd.tcl",
       # and broke all RX. The host owns the sequencing (disable axi_tdd + program the
       # pps_counter window for a gated capture; re-open axi_tdd for streaming).
 
-# CDC false_paths: target cells with bracket-free patterns -- in a TCL -filter
-# NAME=~, "reg[*]" is a character class (matches zero); a trailing "*" covers the
-# bus index. set_false_path -to <cell> applies to its data input.
-# gray_s1 (32-bit l_clk->clk_fpga_0) MUST be false_pathed: it does not meet timing
-# if STA times it (measured: removing it -> -3.3ns/242 endpoints). The gray code +
-# 2-FF sync remains functionally correct (only 1 bit changes per cnt_clk).
-cdc = ("\nset_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/gray_s1_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsc_s1_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppsd_s1_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/ppss_s1_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/en_sync_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/clr_sync_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/pps_meta_reg*}]\n"
-       # LATCH_COUNT/LATCH_SEQ 2-FF CDC (cnt_clk -> s_axi), changes <=1/frame like pps_count
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lc_s1_reg*}]\n"
-       "set_false_path -to [get_cells -hier -filter {NAME =~ *pps_counter_0/inst/lseq_s1_reg*}]\n")
+# Keep the CDC source reviewed and reusable; regen() invalidates the XSA when
+# it changes. Stage-two and reset-release paths are intentionally still timed.
+cdc = "\n" + open("/build/hdl-src/pps_counter/pps_counter_cdc.xdc").read()
 if board == "fishball":
-    pin = ("# PPS input V10 = IO_L21N_T3_DQS_13 = JP5 pin 7 (3V3_IO1), bank 13 = 3.3V,\n"
-           "# PULLDOWN. A 3.3V GPS PPS connects directly; ground is JP5 pin 2 or 20.\n"
+    pin = ("# GPS PPS input: V10 = IO_L21N_T3_DQS_13 = JP5 pin 7 (3V3_IO1), bank 13 = 3.3V.\n"
+           "# GPS UART: U9 = JP5 pin 9 RX, U10 = JP5 pin 11 TX; both are 3.3V.\n"
+           "# A 3.3V GPS PPS connects directly; ground is JP5 pin 2 or 20.\n"
            "set_property PACKAGE_PIN V10 [get_ports pps_ext]\n"
            "set_property IOSTANDARD LVCMOS33 [get_ports pps_ext]\n"
-           "set_property PULLDOWN TRUE [get_ports pps_ext]\n")
+           "set_property PULLDOWN TRUE [get_ports pps_ext]\n"
+           "set_property PACKAGE_PIN U9 [get_ports gps_uart_rx]\n"
+           "set_property IOSTANDARD LVCMOS33 [get_ports gps_uart_rx]\n"
+           "set_property PULLUP TRUE [get_ports gps_uart_rx]\n"
+           "set_property PACKAGE_PIN U10 [get_ports gps_uart_tx]\n"
+           "set_property IOSTANDARD LVCMOS33 [get_ports gps_uart_tx]\n"
+           "set_property SLEW SLOW [get_ports gps_uart_tx]\n")
 elif hwlatch:
     pin = ("# PPS input F20 = IO_L15N_T2_DQS_AD12N_35 (bank 35 = 1.8V), PULLDOWN.\n"
            "# DRIVE WITH <=1.8V (level-shift the 3.3V GPS PPS before F20 AND MIO9!).\n"
@@ -868,24 +903,30 @@ if changed:
     open("/tmp/pps_changed", "w").write("1")
 PYEOF
     [ -f /tmp/pps_changed ] && HDL_CHANGED=1
-    # The xc7z010-1 is nearly full; adding an AXI slave breaks the ADI design's
-    # already-tight timing (violations are in axi_ad9361 CONTROL paths, not ours).
-    # Downgrade the ADI timing gate from fatal error to warning so we still get a
-    # bitstream to validate on hardware (write system_top.xsa instead of
-    # system_top_bad_timing.xsa, and warn instead of erroring out).
+    # Fishball must pass routed timing. Undo a cached historical warning-only
+    # override instead of allowing a failed design to be packaged as successful.
+    # Keep the historical Pluto+ behavior separate from this board's gate.
     GATE=hdl/projects/scripts/adi_project_xilinx.tcl
-    if [ -f "$GATE" ] && ! grep -q 'TIMING_ALLOW override' "$GATE"; then
-        python3 - "$GATE" << 'PYEOF'
-import sys
+    if [ -f "$GATE" ]; then
+        BOARD="$BOARD" python3 - "$GATE" << 'PYEOF'
+import os, sys
 f = sys.argv[1]
 s = open(f).read()
 old = ('    write_hw_platform -fixed -force  -include_bit -file ${actual_project_name}.sdk/system_top_bad_timing.xsa\n'
        '    return -code error [format "ERROR: Timing Constraints NOT met!"]')
 new = ('    write_hw_platform -fixed -force  -include_bit -file ${actual_project_name}.sdk/system_top.xsa\n'
        '    puts "CRITICAL WARNING: Timing Constraints NOT met -- bitstream built anyway (TIMING_ALLOW override); verify on hardware."')
-if old in s:
-    open(f,'w').write(s.replace(old, new))
-    print("  adi_project_xilinx.tcl: timing gate downgraded to warning")
+if os.environ["BOARD"] == "fishball":
+    if new in s:
+        open(f, 'w').write(s.replace(new, old))
+        print("  Fishball: restored fatal routed-timing gate")
+    elif old not in s:
+        raise SystemExit("Fishball: cannot identify strict routed-timing gate")
+    else:
+        print("  Fishball: strict routed-timing gate present")
+elif old in s:
+    open(f, 'w').write(s.replace(old, new))
+    print("  Pluto+: historical timing warning override retained")
 else:
     print("  WARNING: timing-gate text not found; gate NOT patched", file=sys.stderr)
 PYEOF

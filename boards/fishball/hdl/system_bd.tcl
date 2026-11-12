@@ -10,7 +10,8 @@
 # Board deltas from the vendor design (Xiaozhang-code-cloud/Fish-Wan-plutosdr-fw-
 # 7020-SDR @ 95aad369, the factory firmware's commit): PS7 package, bank 0 at
 # 3.3 V, console UART1 on MIO 8..9, SD0 without card detect, 32-bit DDR, LVDS
-# AD9361 interface, 1 GiB DMA window.
+# AD9361 interface, 1 GiB DMA window. GPS NMEA uses a separate AXI UARTLite on
+# JP5 pins 9/11, leaving the FTDI login console on PS UART1 intact.
 
 # create board design
 source $ad_hdl_dir/projects/common/xilinx/adi_fir_filter_bd.tcl
@@ -197,6 +198,22 @@ ad_ip_instance axi_iic axi_iic_main
 ad_connect  iic_main axi_iic_main/iic
 ad_cpu_interconnect 0x41600000 axi_iic_main
 ad_cpu_interrupt ps-15 mb-15 axi_iic_main/iic2intc_irpt
+
+# GPS NMEA UART: GPS TX -> JP5 pin 9 -> rx; JP5 pin 11 -> GPS RX (optional).
+# UARTLite has a fixed baud generator, so configure its 100 MHz clock for the
+# common 9600-baud GPS default. Linux binds it as /dev/ttyUL0.
+create_bd_port -dir I gps_uart_rx
+create_bd_port -dir O gps_uart_tx
+ad_ip_instance axi_uartlite axi_uartlite_gps
+ad_ip_parameter axi_uartlite_gps CONFIG.C_BAUDRATE {9600}
+ad_ip_parameter axi_uartlite_gps CONFIG.C_DATA_BITS {8}
+ad_ip_parameter axi_uartlite_gps CONFIG.C_USE_PARITY {0}
+ad_ip_parameter axi_uartlite_gps CONFIG.C_ODD_PARITY {0}
+ad_ip_parameter axi_uartlite_gps CONFIG.C_S_AXI_ACLK_FREQ_HZ {100000000}
+ad_connect gps_uart_rx axi_uartlite_gps/rx
+ad_connect gps_uart_tx axi_uartlite_gps/tx
+ad_cpu_interconnect 0x42C00000 axi_uartlite_gps
+ad_cpu_interrupt ps-14 mb-14 axi_uartlite_gps/interrupt
 
 # ad9361
 

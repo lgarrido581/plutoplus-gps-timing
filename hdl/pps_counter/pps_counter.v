@@ -125,6 +125,18 @@ module pps_counter #(
     input  wire                              s_axi_rready
 );
 
+    // The board's reset comes from the AXI/FCLK domain. Assert immediately,
+    // but release only on cnt_clk edges so every counter-domain flop sees a
+    // recovery/removal-safe reset. Only this synchronizer's asynchronous reset
+    // pins are excepted in pps_counter_cdc.xdc; its downstream reset is timed.
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *)
+    reg [1:0] cnt_reset_sync = 2'b00;
+    always @(posedge cnt_clk or negedge cnt_resetn) begin
+        if (!cnt_resetn) cnt_reset_sync <= 2'b00;
+        else cnt_reset_sync <= {cnt_reset_sync[0], 1'b1};
+    end
+    wire cnt_resetn_local = cnt_reset_sync[1];
+
     // ----------------------------------------------------------------- //
     // Control bits live in the AXI domain, synced into the counter domain
     // ----------------------------------------------------------------- //
@@ -132,7 +144,7 @@ module pps_counter #(
     reg        ctrl_clear  = 1'b0;     // pulse
     reg  [1:0] ctrl_gpio   = 2'b00;    // CTRL[5:4] -> gpio_out (I/O voltage test)
     assign     gpio_out    = ctrl_gpio;
-    reg  [1:0] en_sync, clr_sync;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [1:0] en_sync, clr_sync;
     always @(posedge cnt_clk) begin
         en_sync  <= {en_sync[0],  ctrl_enable};
         clr_sync <= {clr_sync[0], ctrl_clear};
@@ -170,11 +182,11 @@ module pps_counter #(
     reg         tx_stop_one     = 1'b0;
 
     // 2-FF sync config into cnt_clk (stable-while-enabled contract above)
-    reg  [4:0]  tdc_s1, tdc_s2;
-    reg  [31:0] flen_s1, flen_s2, rxa_s1, rxa_s2, rxo_s1, rxo_s2, txa_s1, txa_s2, txo_s1, txo_s2;
-    reg  [31:0] flenm2_s1, flenm2_s2, rxam2_s1, rxam2_s2, rxom2_s1, rxom2_s2;
-    reg  [31:0] txam2_s1, txam2_s2, txom2_s1, txom2_s2;
-    reg  [7:0]  tdf_s1, tdf_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [4:0] tdc_s1, tdc_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] flen_s1, flen_s2, rxa_s1, rxa_s2, rxo_s1, rxo_s2, txa_s1, txa_s2, txo_s1, txo_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] flenm2_s1, flenm2_s2, rxam2_s1, rxam2_s2, rxom2_s1, rxom2_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] txam2_s1, txam2_s2, txom2_s1, txom2_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [7:0] tdf_s1, tdf_s2;
     always @(posedge cnt_clk) begin
         tdc_s1  <= tdd_ctrl;  tdc_s2  <= tdc_s1;
         flen_s1 <= frame_len; flen_s2 <= flen_s1;
@@ -213,6 +225,7 @@ module pps_counter #(
     reg  [31:0] pps_prev  = 32'd0;
     reg  [31:0] pps_delta = 32'd0;
     reg  [31:0] pps_seq   = 32'd0;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *)
     reg  [1:0]  pps_meta  = 2'b00;     // sync PPS into cnt_clk
     reg         pps_d     = 1'b0;
     reg         pps_tick_r = 1'b0;     // registered 1-cyc PPS-edge pulse -> axi_tdd sync
@@ -220,8 +233,8 @@ module pps_counter #(
     wire        pps_rise  = pps_s & ~pps_d;
     assign      pps_tick  = pps_tick_r;
 
-    always @(posedge cnt_clk or negedge cnt_resetn) begin
-        if (!cnt_resetn) begin
+    always @(posedge cnt_clk or negedge cnt_resetn_local) begin
+        if (!cnt_resetn_local) begin
             counter <= 0; pps_count <= 0; pps_prev <= 0;
             pps_delta <= 0; pps_seq <= 0; pps_meta <= 0; pps_d <= 0; pps_tick_r <= 0;
         end else begin
@@ -255,8 +268,8 @@ module pps_counter #(
     reg         rx_stop_event_r  = 1'b0;
     reg         tx_start_event_r = 1'b0;
     reg         tx_stop_event_r  = 1'b0;
-    always @(posedge cnt_clk or negedge cnt_resetn) begin
-        if (!cnt_resetn) begin
+    always @(posedge cnt_clk or negedge cnt_resetn_local) begin
+        if (!cnt_resetn_local) begin
             frame_cnt <= 0; frame_seq <= 0; sync_pulse <= 0;
             in_rx_r <= 0; in_tx_r <= 0;
             frame_wrap_r <= 0;
@@ -309,11 +322,11 @@ module pps_counter #(
     // FRAME_POS CDC: Gray-code (changes every cnt_clk), like live_count
     reg [31:0] fgray;
     always @(posedge cnt_clk) fgray <= bin2gray(frame_cnt);
-    reg [31:0] fgray_s1, fgray_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] fgray_s1, fgray_s2;
     always @(posedge s_axi_aclk) begin fgray_s1 <= fgray; fgray_s2 <= fgray_s1; end
     wire [31:0] frame_pos = gray2bin(fgray_s2);
     // FRAME_SEQ changes <= once/frame -> 2-FF sync
-    reg [31:0] fseq_s1, fseq_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] fseq_s1, fseq_s2;
     always @(posedge s_axi_aclk) begin fseq_s1 <= frame_seq; fseq_s2 <= fseq_s1; end
 
     // ----------------------------------------------------------------- //
@@ -329,7 +342,7 @@ module pps_counter #(
 
     reg [31:0] gray_cnt;
     always @(posedge cnt_clk) gray_cnt <= bin2gray(counter);
-    reg [31:0] gray_s1, gray_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] gray_s1, gray_s2;
     always @(posedge s_axi_aclk) begin gray_s1 <= gray_cnt; gray_s2 <= gray_s1; end
     wire [31:0] live_count = gray2bin(gray_s2);
 
@@ -351,14 +364,14 @@ module pps_counter #(
             latch_seq   <= latch_seq + 32'd1;
         end
     end
-    reg [31:0] lc_s1, lc_s2, lseq_s1, lseq_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] lc_s1, lc_s2, lseq_s1, lseq_s2;
     always @(posedge s_axi_aclk) begin
         lc_s1   <= latch_count; lc_s2   <= lc_s1;
         lseq_s1 <= latch_seq;   lseq_s2 <= lseq_s1;
     end
 
     // PPS_* change <=1/sec -> simple 2-FF sync into AXI domain
-    reg [31:0] ppsc_s1, ppsc_s2, ppsd_s1, ppsd_s2, ppss_s1, ppss_s2;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [31:0] ppsc_s1, ppsc_s2, ppsd_s1, ppsd_s2, ppss_s1, ppss_s2;
     always @(posedge s_axi_aclk) begin
         ppsc_s1 <= pps_count; ppsc_s2 <= ppsc_s1;
         ppsd_s1 <= pps_delta; ppsd_s2 <= ppsd_s1;
